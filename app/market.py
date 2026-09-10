@@ -31,8 +31,24 @@ class Candidate:
         }
 
 
-def kline_range_pct(rows: list[list[str]]) -> float | None:
-    """Размах (max high − min low) по свечам, %."""
+@dataclass(frozen=True)
+class Momentum:
+    """Краткосрочный контекст окна: куда идёт цена и где она внутри диапазона."""
+
+    change_pct: float  # закрытие против открытия окна
+    range_pct: float  # размах окна
+    position: float  # 0 — у минимума окна, 1 — у максимума
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "change_pct": round(self.change_pct, 3),
+            "range_pct": round(self.range_pct, 3),
+            "position": round(self.position, 3),
+        }
+
+
+def momentum_from_klines(rows: list[list[str]]) -> Momentum | None:
+    """Bybit отдаёт свечи от новых к старым: rows[0] — текущая минута."""
     highs: list[float] = []
     lows: list[float] = []
     for row in rows:
@@ -43,14 +59,29 @@ def kline_range_pct(rows: list[list[str]]) -> float | None:
             continue
     if not highs or not lows:
         return None
-    lo = min(lows)
-    if lo <= 0:
+    try:
+        last_close = float(rows[0][4])
+        first_open = float(rows[-1][1])
+    except (IndexError, TypeError, ValueError):
         return None
-    return (max(highs) - lo) / lo * 100.0
+    hi, lo = max(highs), min(lows)
+    if lo <= 0 or first_open <= 0:
+        return None
+    span = hi - lo
+    return Momentum(
+        change_pct=(last_close - first_open) / first_open * 100.0,
+        range_pct=span / lo * 100.0,
+        position=(last_close - lo) / span if span > 0 else 0.5,
+    )
 
 
-class RangeMeter:
-    """Размах за последние N минут с коротким кэшем (экономия REST-лимита)."""
+def kline_range_pct(rows: list[list[str]]) -> float | None:
+    m = momentum_from_klines(rows)
+    return m.range_pct if m else None
+
+
+class MarketMeter:
+    """Окно последних минут с коротким кэшем (экономия REST-лимита)."""
 
     def __init__(
         self, client: BybitClient, minutes: int = 15, ttl_sec: float = 60.0
@@ -58,9 +89,9 @@ class RangeMeter:
         self.client = client
         self.minutes = minutes
         self.ttl_sec = ttl_sec
-        self._cache: dict[str, tuple[float, float | None]] = {}
+        self._cache: dict[str, tuple[float, Momentum | None]] = {}
 
-    def range_pct(self, symbol: str) -> float | None:
+    def momentum(self, symbol: str) -> Momentum | None:
         now = time.time()
         hit = self._cache.get(symbol)
         if hit and now - hit[0] < self.ttl_sec:
@@ -69,11 +100,15 @@ class RangeMeter:
             rows = self.client.klines(
                 symbol, category="linear", interval="1", limit=self.minutes
             )
-            value = kline_range_pct(rows)
+            value = momentum_from_klines(rows)
         except Exception:
             value = hit[1] if hit else None
         self._cache[symbol] = (now, value)
         return value
+
+    def range_pct(self, symbol: str) -> float | None:
+        m = self.momentum(symbol)
+        return m.range_pct if m else None
 
 
 def rank_candidates(

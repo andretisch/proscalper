@@ -9,7 +9,7 @@ from pathlib import Path
 from app.ai import OllamaClient
 from app.bybit_client import BybitClient
 from app.config import load_settings
-from app.market import RangeMeter, rank_candidates
+from app.market import MarketMeter, rank_candidates
 from app.orderbook_store import OrderBookStore
 from app.paper import PaperBroker
 from app.paper_exec import entry_fill_price
@@ -42,7 +42,7 @@ class ProScalpApp:
             price_tol_pct=self.settings.wall_min_dist_pct * 2.5,
             ttl_sec=max(300.0, self.settings.room_window_sec),
         )
-        self.ranges = RangeMeter(
+        self.market = MarketMeter(
             self.bybit, minutes=int(self.settings.room_window_sec // 60) or 15
         )
         self.watchlist = list(DEFAULT_WATCH)
@@ -179,7 +179,8 @@ class ProScalpApp:
                     pass
             fee_rt = taker_rate * 100 * 2
 
-            room = self.ranges.range_pct(symbol)
+            momentum = self.market.momentum(symbol)
+            room = momentum.range_pct if momentum else None
             if room is None:
                 room = self.store.recent_range_pct(
                     symbol, window_sec=self.settings.room_window_sec
@@ -191,6 +192,7 @@ class ProScalpApp:
                 fee_roundtrip_pct=fee_rt,
                 wall_track=self.walls.track(symbol),
                 room_pct=room,
+                momentum=momentum,
                 min_wall_observations=self.settings.wall_min_observations,
                 min_wall_age_sec=self.settings.wall_min_age_sec,
                 min_wall_held_share=self.settings.wall_min_held_share,

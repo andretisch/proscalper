@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.market import kline_range_pct, rank_candidates
+from app.market import kline_range_pct, momentum_from_klines, rank_candidates
 
 
 def _ticker(symbol, last, high, low, turnover, change=0.0):
@@ -26,6 +26,32 @@ def test_kline_range_uses_high_low_extremes():
 
 def test_kline_range_none_without_data():
     assert kline_range_pct([]) is None
+
+
+def test_momentum_reads_newest_first():
+    # Bybit отдаёт свечи от новых к старым: rows[0] — текущая минута
+    rows = [
+        ["0", "11", "12", "11", "12", "1", "1"],  # сейчас
+        ["0", "10", "11", "10", "11", "1", "1"],  # минуту назад
+    ]
+    m = momentum_from_klines(rows)
+    assert m.change_pct == (12 - 10) / 10 * 100
+    assert m.position == 1.0  # закрылись на максимуме окна
+
+
+def test_momentum_position_at_low():
+    rows = [
+        ["0", "11", "11", "10", "10", "1", "1"],
+        ["0", "12", "12", "11", "11", "1", "1"],
+    ]
+    m = momentum_from_klines(rows)
+    assert m.change_pct < 0
+    assert m.position == 0.0
+
+
+def test_momentum_flat_window_centres_position():
+    rows = [["0", "10", "10", "10", "10", "1", "1"]]
+    assert momentum_from_klines(rows).position == 0.5
 
 
 def test_ranks_by_range_not_by_change():

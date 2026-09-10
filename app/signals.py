@@ -12,12 +12,17 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.market import Momentum
 from app.wall_tracker import WallTrack
 
 # Скальп-цель ограничена реальностью, а не толщиной стакана.
 MAX_EXPECTED_MOVE_PCT = 1.2
 # Доля недавнего размаха, на которую разумно рассчитывать внутри сделки.
 ROOM_CAPTURE = 0.5
+# Насколько близко к краю окна ещё можно входить по импульсу.
+CHASE_LIMIT = 0.85
+# S5: шорт от отскока внутри слива, а не с минимума.
+DRAIN_MIN_POSITION = 0.25
 
 
 @dataclass
@@ -66,6 +71,20 @@ def _regime(change24: float) -> str:
     return "range"
 
 
+def _trigger(momentum: Momentum | None, change24: float) -> bool:
+    """Триггер импульсного сетапа.
+
+    Суточное изменение — это контекст, а не повод для входа. Нужен ход прямо
+    сейчас в ту же сторону, и цена не должна стоять у самого края окна:
+    покупка на вершине выноса — это вход в чужой профит.
+    """
+    if momentum is None or momentum.range_pct <= 0:
+        return False
+    if change24 > 0:
+        return momentum.change_pct > 0 and momentum.position <= CHASE_LIMIT
+    return momentum.change_pct < 0 and momentum.position >= 1.0 - CHASE_LIMIT
+
+
 def _viable(
     *, expected: float, risk_pct: float, fee_roundtrip_pct: float, min_rr: float
 ) -> tuple[bool, float]:
@@ -88,6 +107,7 @@ def detect_signals(
     fee_roundtrip_pct: float = 0.11,
     wall_track: WallTrack | None = None,
     room_pct: float | None = None,
+    momentum: Momentum | None = None,
     min_wall_observations: int = 2,
     min_wall_age_sec: float = 45.0,
     min_wall_held_share: float = 0.6,
@@ -173,7 +193,7 @@ def detect_signals(
                 )
 
     # S4 — продолжение по активному инструменту.
-    if regime == "trend_in_play" and abs(change24) >= 8:
+    if regime == "trend_in_play" and abs(change24) >= 8 and _trigger(momentum, change24):
         side = "long" if change24 > 0 else "short"
         risk_pct = max(_clamp(room_pct * 0.25, 0.1, 0.8), spread_pct * 3)
         stop = (
@@ -194,7 +214,11 @@ def detect_signals(
                     regime=regime,
                     entry_price=mid,
                     stop_price=stop,
-                    reason=f"S4 in-play change24={change24:.2f}% размах={room_pct:.2f}%",
+                    reason=(
+                        f"S4 in-play change24={change24:.2f}% "
+                        f"ход={momentum.change_pct:+.2f}% "
+                        f"позиция={momentum.position:.2f} размах={room_pct:.2f}%"
+                    ),
                     expected_move_pct=capture,
                     risk_pct=risk_pct,
                     rr=rr,
@@ -202,8 +226,13 @@ def detect_signals(
                 )
             )
 
-    # S5 — слив после листинга/вертикали.
-    if regime == "post_listing_drain":
+    # S5 — слив после листинга/вертикали: шортим продолжение слива, не дно.
+    if (
+        regime == "post_listing_drain"
+        and momentum is not None
+        and momentum.change_pct < 0
+        and momentum.position >= DRAIN_MIN_POSITION
+    ):
         risk_pct = max(_clamp(room_pct * 0.25, 0.15, 0.8), spread_pct * 3)
         stop = mid * (1 + risk_pct / 100)
         ok, rr = _viable(
@@ -221,7 +250,11 @@ def detect_signals(
                     regime=regime,
                     entry_price=mid,
                     stop_price=stop,
-                    reason=f"S5 drain change24={change24:.2f}% размах={room_pct:.2f}%",
+                    reason=(
+                        f"S5 drain change24={change24:.2f}% "
+                        f"ход={momentum.change_pct:+.2f}% "
+                        f"позиция={momentum.position:.2f} размах={room_pct:.2f}%"
+                    ),
                     expected_move_pct=capture,
                     risk_pct=risk_pct,
                     rr=rr,
