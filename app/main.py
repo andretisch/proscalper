@@ -9,6 +9,7 @@ from pathlib import Path
 from app.ai import OllamaClient
 from app.bybit_client import BybitClient
 from app.config import load_settings
+from app.market import RangeMeter, rank_candidates
 from app.orderbook_store import OrderBookStore
 from app.paper import PaperBroker
 from app.paper_exec import entry_fill_price
@@ -40,6 +41,9 @@ class ProScalpApp:
         self.walls = WallTracker(
             price_tol_pct=self.settings.wall_min_dist_pct * 2.5,
             ttl_sec=max(300.0, self.settings.room_window_sec),
+        )
+        self.ranges = RangeMeter(
+            self.bybit, minutes=int(self.settings.room_window_sec // 60) or 15
         )
         self.watchlist = list(DEFAULT_WATCH)
         self.running = True
@@ -95,33 +99,27 @@ class ProScalpApp:
         )
 
     def refresh_watchlist_ai(self) -> str:
-        tickers = self.bybit.tickers(category="linear")
-        scored = []
-        for t in tickers:
-            try:
-                turn = float(t.get("turnover24h") or 0)
-                ch = float(t.get("price24hPcnt") or 0) * 100
-                if turn < 1_000_000:
-                    continue
-                scored.append(
-                    {
-                        "symbol": t.get("symbol"),
-                        "change24h_pct": round(ch, 2),
-                        "turnover24h": round(turn, 0),
-                        "last": t.get("lastPrice"),
-                    }
-                )
-            except Exception:
-                continue
-        scored.sort(key=lambda x: abs(x["change24h_pct"]), reverse=True)
-        decision = self.ai.watchlist_pick(scored[:40], limit=5)
-        symbols = [
-            s for s in (decision.get("symbols") or []) if isinstance(s, str) and s.endswith("USDT")
+        """Watchlist из символов «в игре»: без хода скальп не окупает комиссию."""
+        candidates = rank_candidates(
+            self.bybit.tickers(category="linear"),
+            min_turnover=self.settings.min_turnover_usd,
+            min_range_pct=self.settings.min_range24_pct,
+        )
+        if not candidates:
+            return "нет символов в игре, watchlist без изменений"
+        pool = [c.symbol for c in candidates]
+        decision = self.ai.watchlist_pick([c.to_dict() for c in candidates], limit=5)
+        picked = [
+            s
+            for s in (decision.get("symbols") or [])
+            if isinstance(s, str) and s in pool
         ]
-        symbols = symbols[:5]
-        if symbols:
-            self.watchlist = symbols
-        return decision.get("comment") or "watchlist updated"
+        # ИИ может вернуть мусор или пустой список — ранжирование по размаху
+        # остаётся источником истины.
+        symbols = (picked + pool)[:5] if picked else pool[:5]
+        seen: set[str] = set()
+        self.watchlist = [s for s in symbols if not (s in seen or seen.add(s))]
+        return decision.get("comment") or "watchlist обновлён по размаху"
 
     def collect_books(self) -> dict[str, dict]:
         books: dict[str, dict] = {}
@@ -181,9 +179,11 @@ class ProScalpApp:
                     pass
             fee_rt = taker_rate * 100 * 2
 
-            room = self.store.recent_range_pct(
-                symbol, window_sec=self.settings.room_window_sec
-            )
+            room = self.ranges.range_pct(symbol)
+            if room is None:
+                room = self.store.recent_range_pct(
+                    symbol, window_sec=self.settings.room_window_sec
+                )
             signals = detect_signals(
                 symbol=symbol,
                 snap=snap,

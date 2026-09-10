@@ -70,6 +70,24 @@ class BybitClient:
             {"category": category, "symbol": symbol, "limit": limit},
         )
 
+    def klines(
+        self,
+        symbol: str,
+        category: str = "linear",
+        interval: str = "1",
+        limit: int = 15,
+    ) -> list[list[str]]:
+        result = self.get_public(
+            "/v5/market/kline",
+            {
+                "category": category,
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit,
+            },
+        )
+        return result.get("list") or []
+
     def tickers(self, category: str = "linear", symbol: str | None = None) -> list:
         params: dict[str, Any] = {"category": category}
         if symbol:

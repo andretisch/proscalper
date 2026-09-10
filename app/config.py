@@ -71,6 +71,8 @@ class Settings:
     wall_approach_pct: float
     min_rr: float
     room_window_sec: float
+    min_turnover_usd: float
+    min_range24_pct: float
 
     @property
     def proxy_enabled(self) -> bool:
@@ -142,6 +144,8 @@ def load_settings() -> Settings:
         wall_approach_pct=_float(os.getenv("WALL_APPROACH_PCT"), 0.12),
         min_rr=_float(os.getenv("MIN_RR"), 1.5),
         room_window_sec=_float(os.getenv("ROOM_WINDOW_SEC"), 900.0),
+        min_turnover_usd=_float(os.getenv("MIN_TURNOVER_USD"), 20_000_000.0),
+        min_range24_pct=_float(os.getenv("MIN_RANGE24_PCT"), 3.0),
     )
     from app.http_client import apply_proxy_env
 

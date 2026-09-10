@@ -14,6 +14,8 @@ def main() -> None:
 
     app = ProScalpApp()
     app.tg.send = lambda *_a, **_k: True  # type: ignore[assignment]
+    print(app.refresh_watchlist_ai(), flush=True)
+    print("watchlist:", ", ".join(app.watchlist), flush=True)
     for i in range(cycles):
         started = time.time()
         print(app.run_once(notify=False), flush=True)
