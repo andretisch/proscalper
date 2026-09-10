@@ -15,8 +15,9 @@ from app.paper_exec import entry_fill_price
 from app.risk import RiskState
 from app.signals import detect_signals
 from app.telegram_bot import TelegramBot
+from app.wall_tracker import WallTracker
 
-DEFAULT_WATCH = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+DEFAULT_WATCH = ["SOLUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
 
 
 class ProScalpApp:
@@ -36,6 +37,10 @@ class ProScalpApp:
         self.paper = PaperBroker(self.settings, self.risk)
         self.ai = OllamaClient(self.settings)
         self.tg = TelegramBot(self.settings)
+        self.walls = WallTracker(
+            price_tol_pct=self.settings.wall_min_dist_pct * 2.5,
+            ttl_sec=max(300.0, self.settings.room_window_sec),
+        )
         self.watchlist = list(DEFAULT_WATCH)
         self.running = True
         self.cycle = 0
@@ -76,6 +81,8 @@ class ProScalpApp:
         return (
             f"ProScalp status\n"
             f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
+            f"data={'mainnet' if self.settings.market_data_mainnet else 'testnet'} "
+            f"taker={self.settings.taker_fee_rate_override * 100:.3f}%\n"
             f"proxy={'on' if self.settings.proxy_enabled else 'off'}\n"
             f"no_impulse={self.settings.max_seconds_without_impulse}s "
             f"max_open={self.settings.max_parallel_symbols}\n"
@@ -111,10 +118,6 @@ class ProScalpApp:
         symbols = [
             s for s in (decision.get("symbols") or []) if isinstance(s, str) and s.endswith("USDT")
         ]
-        # always keep BTC/ETH if present in market
-        for must in ("BTCUSDT", "ETHUSDT"):
-            if must not in symbols:
-                symbols.insert(0, must)
         symbols = symbols[:5]
         if symbols:
             self.watchlist = symbols
@@ -125,11 +128,22 @@ class ProScalpApp:
         for symbol in self.watchlist:
             for category, mtype in (("linear", "perp"), ("spot", "spot")):
                 try:
-                    raw = self.bybit.orderbook(symbol, category=category, limit=25)
-                    snap = OrderBookStore.parse_book(raw, mtype)
+                    raw = self.bybit.orderbook(
+                        symbol, category=category, limit=self.settings.book_depth_limit
+                    )
+                    snap = OrderBookStore.parse_book(
+                        raw,
+                        mtype,
+                        self.settings.wall_max_dist_pct,
+                        scan_pct=self.settings.wall_scan_pct,
+                        min_wall_dist_pct=self.settings.wall_min_dist_pct,
+                        min_depth_share=self.settings.wall_min_depth_share,
+                        min_wall_ratio=self.settings.wall_min_ratio,
+                    )
                     snap["symbol"] = symbol
                     self.store.save(snap)
                     if mtype == "perp":
+                        self.walls.observe(symbol, snap.get("density"))
                         books[symbol] = snap
                     elif symbol in books:
                         books[symbol]["spot_wall"] = {
@@ -157,21 +171,39 @@ class ProScalpApp:
         for symbol, snap in books.items():
             tickers = self.bybit.tickers(category="linear", symbol=symbol)
             ticker = tickers[0] if tickers else None
-            taker_rate = 0.00055
-            try:
-                fee = self.bybit.fee_rate(symbol, category="linear")
-                taker_rate = float(fee.get("takerFeeRate") or 0.00055)
-                taker = taker_rate * 100
-                fee_rt = taker * 2
-            except Exception:
-                pass
+            taker_rate = self.settings.taker_fee_rate_override
+            if not self.settings.market_data_mainnet:
+                # testnet fee schedule only makes sense with testnet books
+                try:
+                    fee = self.bybit.fee_rate(symbol, category="linear")
+                    taker_rate = float(fee.get("takerFeeRate") or taker_rate)
+                except Exception:
+                    pass
+            fee_rt = taker_rate * 100 * 2
 
+            room = self.store.recent_range_pct(
+                symbol, window_sec=self.settings.room_window_sec
+            )
             signals = detect_signals(
-                symbol=symbol, snap=snap, ticker=ticker, fee_roundtrip_pct=fee_rt
+                symbol=symbol,
+                snap=snap,
+                ticker=ticker,
+                fee_roundtrip_pct=fee_rt,
+                wall_track=self.walls.track(symbol),
+                room_pct=room,
+                min_wall_observations=self.settings.wall_min_observations,
+                min_wall_age_sec=self.settings.wall_min_age_sec,
+                min_wall_held_share=self.settings.wall_min_held_share,
+                wall_approach_pct=self.settings.wall_approach_pct,
+                min_rr=self.settings.min_rr,
             )
             for sig in signals[:1]:
                 if symbol in open_symbols:
                     skipped.append(f"{symbol}: already open")
+                    continue
+                cd = self.paper.cooldown_left(symbol)
+                if cd > 0:
+                    skipped.append(f"{symbol}: cooldown {cd:.0f}s")
                     continue
                 if self.paper.open_count() >= self.settings.max_parallel_symbols:
                     skipped.append(f"{symbol}: max_parallel={self.settings.max_parallel_symbols}")
@@ -184,8 +216,10 @@ class ProScalpApp:
                         sig.to_dict(),
                         context=(
                             f"fee_rt%={fee_rt:.4f}; mid={snap.get('mid')}; "
-                            f"wall={snap.get('wall_side')}@{snap.get('wall_price')} "
-                            f"ratio={snap.get('wall_ratio')}"
+                            f"ЛП={snap.get('wall_side')}@{snap.get('wall_price')} "
+                            f"доля_глубины={(snap.get('wall_share') or 0) * 100:.0f}%; "
+                            f"размах_15м={room:.3f}%; "
+                            f"стакан_виден_на={snap.get('book_range_pct', 0):.3f}%"
                         ),
                     )
                 except Exception as e:
@@ -289,6 +323,7 @@ class ProScalpApp:
                     last_watch = time.time()
                 self.run_once(notify=True)
             except Exception as e:
+                print(f"[cycle error] {type(e).__name__}: {e}", flush=True)
                 self.tg.send(f"Ошибка цикла: {e}")
 
 
