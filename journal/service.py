@@ -249,8 +249,10 @@ class Journal:
         exit_ts: str | None = None,
         exit_reason: str | None = None,
         notes: str | None = None,
+        fees_usd: float = 0.0,
     ) -> dict[str, Any]:
         ts = exit_ts or utc_now()
+        fees_usd = max(float(fees_usd), 0.0)
         with connect(self.db_path) as conn:
             trade = conn.execute(
                 "SELECT * FROM trades WHERE id = ?", (trade_id,)
@@ -264,9 +266,10 @@ class Journal:
             size = float(trade["size"])
             side = trade["side"]
             if side == "long":
-                pnl = (float(exit_price) - entry) * size
+                gross_pnl = (float(exit_price) - entry) * size
             else:
-                pnl = (entry - float(exit_price)) * size
+                gross_pnl = (entry - float(exit_price)) * size
+            pnl = gross_pnl - fees_usd
 
             pnl_r = None
             if trade["stop_price"] is not None:
@@ -308,6 +311,8 @@ class Journal:
                     json.dumps(
                         {
                             "exit_price": exit_price,
+                            "gross_pnl_usd": gross_pnl,
+                            "fees_usd": fees_usd,
                             "pnl_usd": pnl,
                             "pnl_r": pnl_r,
                             "exit_reason": exit_reason,
@@ -319,9 +324,12 @@ class Journal:
             conn.commit()
             return {
                 "trade_id": trade_id,
+                "gross_pnl_usd": gross_pnl,
+                "fees_usd": fees_usd,
                 "pnl_usd": pnl,
                 "pnl_r": pnl_r,
                 "exit_price": exit_price,
+                "exit_reason": exit_reason,
             }
 
     def save_orderbook(self, snap: OrderBookSnapshotIn) -> int:

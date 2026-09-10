@@ -94,32 +94,36 @@ def detect_signals(
     if regime == "trend_in_play" and abs(change24) >= 8:
         side = "long" if change24 > 0 else "short"
         stop = mid * (0.997 if side == "long" else 1.003)
-        out.append(
-            Signal(
-                symbol=symbol,
-                setup_id="S4_active_continuation",
-                side=side,
-                regime=regime,
-                entry_price=float(mid),
-                stop_price=float(stop),
-                reason=f"S4 in-play change24={change24:.2f}%",
-                expected_move_pct=max(0.25, abs(change24) * 0.05),
+        expected = max(0.25, abs(change24) * 0.05)
+        if expected >= fee_roundtrip_pct * 3:
+            out.append(
+                Signal(
+                    symbol=symbol,
+                    setup_id="S4_active_continuation",
+                    side=side,
+                    regime=regime,
+                    entry_price=float(mid),
+                    stop_price=float(stop),
+                    reason=f"S4 in-play change24={change24:.2f}%",
+                    expected_move_pct=expected,
+                )
             )
-        )
 
     # S5 drain
     if regime == "post_listing_drain":
-        out.append(
-            Signal(
-                symbol=symbol,
-                setup_id="S5_drain_short",
-                side="short",
-                regime=regime,
-                entry_price=float(mid),
-                stop_price=float(mid) * 1.004,
-                reason=f"S5 drain change24={change24:.2f}%",
-                expected_move_pct=0.35,
+        expected = 0.35
+        if expected >= fee_roundtrip_pct * 3:
+            out.append(
+                Signal(
+                    symbol=symbol,
+                    setup_id="S5_drain_short",
+                    side="short",
+                    regime=regime,
+                    entry_price=float(mid),
+                    stop_price=float(mid) * 1.004,
+                    reason=f"S5 drain change24={change24:.2f}%",
+                    expected_move_pct=expected,
+                )
             )
-        )
 
     return out

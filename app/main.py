@@ -11,6 +11,7 @@ from app.bybit_client import BybitClient
 from app.config import load_settings
 from app.orderbook_store import OrderBookStore
 from app.paper import PaperBroker
+from app.paper_exec import entry_fill_price
 from app.risk import RiskState
 from app.signals import detect_signals
 from app.telegram_bot import TelegramBot
@@ -69,14 +70,18 @@ class ProScalpApp:
 
     def status_text(self) -> str:
         stats = self.paper.journal.stats()
+        wr = stats.get("winrate")
+        wr_s = f"{wr * 100:.1f}%" if wr is not None else "—"
         return (
             f"ProScalp status\n"
             f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
             f"proxy={'on' if self.settings.proxy_enabled else 'off'}\n"
+            f"paper_hold={self.settings.paper_min_hold_sec}-{self.settings.paper_max_hold_sec}s\n"
             f"risk={self.risk.status()} day_pnl={self.risk.day_pnl:.2f} USDT\n"
             f"watchlist={', '.join(self.watchlist)}\n"
             f"orderbook_snaps={self.store.count()}\n"
-            f"journal closed={stats.get('closed_trades')} pnl={stats.get('pnl_usd_total')}\n"
+            f"journal open={stats.get('open_trades')} closed={stats.get('closed_trades')} "
+            f"wr={wr_s} pnl_net={stats.get('pnl_usd_total')}\n"
             f"playbook=v{self.settings.playbook_version}"
         )
 
@@ -134,15 +139,19 @@ class ProScalpApp:
         can, why = self.risk.can_open()
         books = self.collect_books()
         opened = []
+        closed, risk_events = self.paper.manage_open_trades(books)
         skipped = []
+        open_symbols = self.paper.open_symbols()
 
         fee_rt = 0.11  # fallback %; refine per symbol if available
         for symbol, snap in books.items():
             tickers = self.bybit.tickers(category="linear", symbol=symbol)
             ticker = tickers[0] if tickers else None
+            taker_rate = 0.00055
             try:
                 fee = self.bybit.fee_rate(symbol, category="linear")
-                taker = float(fee.get("takerFeeRate") or 0.00055) * 100
+                taker_rate = float(fee.get("takerFeeRate") or 0.00055)
+                taker = taker_rate * 100
                 fee_rt = taker * 2
             except Exception:
                 pass
@@ -151,6 +160,9 @@ class ProScalpApp:
                 symbol=symbol, snap=snap, ticker=ticker, fee_roundtrip_pct=fee_rt
             )
             for sig in signals[:1]:
+                if symbol in open_symbols:
+                    skipped.append(f"{symbol}: already open")
+                    continue
                 if not can:
                     skipped.append(f"{symbol}: risk block ({why})")
                     continue
@@ -173,12 +185,12 @@ class ProScalpApp:
                     )
                     continue
 
-                size = self.risk.size_for_stop(sig.entry_price, sig.stop_price)
-                # tiny paper size cap for $100 deposit
-                notional = size * sig.entry_price
+                fill = entry_fill_price(snap, sig.side)
+                size = self.risk.size_for_stop(fill, sig.stop_price)
+                notional = size * fill
                 max_notional = self.settings.deposit_usdt * 0.2 * self.settings.leverage
-                if notional > max_notional and sig.entry_price > 0:
-                    size = max_notional / sig.entry_price
+                if notional > max_notional and fill > 0:
+                    size = max_notional / fill
                 if size <= 0:
                     skipped.append(f"{symbol}: size=0")
                     continue
@@ -188,34 +200,39 @@ class ProScalpApp:
                     size=size,
                     ai_comment=str(decision.get("comment") or ""),
                     book_snap=snap,
+                    fee_roundtrip_pct=fee_rt,
+                    taker_fee_rate=taker_rate,
                 )
-                # paper: simulate quick scalp exit slightly in favor if go
-                exit_px = (
-                    sig.entry_price * (1.001 if sig.side == "long" else 0.999)
-                )
-                result = self.paper.close_trade(
-                    trade_id,
-                    exit_price=exit_px,
-                    reason="paper_impulse_sim",
-                    ai_comment="paper auto-exit after entry simulation",
-                )
+                open_symbols.add(symbol)
                 opened.append(
-                    f"#{trade_id} {symbol} {sig.setup_id} {sig.side} pnl={result.get('pnl_usd')}"
+                    f"#{trade_id} {symbol} {sig.setup_id} {sig.side} entry={fill:.6g}"
                 )
-                for ev in result.get("risk_events") or []:
-                    if ev == "soft_pause":
-                        self.tg.send("⚠️ Мягкая пауза: достигнут 50% дневного лимита (−1%). Пауза 2ч.")
-                    if ev == "hard_stop":
-                        self.tg.send("🛑 Жёсткий дневной стоп (−2%). Торговля остановлена на 24ч или /resume.")
+
+        if notify:
+            for ev in risk_events:
+                if ev == "soft_pause":
+                    self.tg.send(
+                        "⚠️ Мягкая пауза: достигнут 50% дневного лимита (−1%). Пауза 2ч."
+                    )
+                if ev == "hard_stop":
+                    self.tg.send(
+                        "🛑 Жёсткий дневной стоп (−2%). Торговля остановлена на 24ч или /resume."
+                    )
 
         summary = (
             f"Цикл #{self.cycle}\n"
             f"books={len(books)} snaps_total={self.store.count()}\n"
+            f"closed: {closed or ['—']}\n"
             f"opened: {opened or ['—']}\n"
             f"notes: {skipped[:5] or ['—']}"
         )
-        if notify and opened:
-            self.tg.send("Сделки paper:\n" + "\n".join(opened))
+        if notify and (opened or closed):
+            parts = []
+            if closed:
+                parts.append("Закрыто paper:\n" + "\n".join(closed))
+            if opened:
+                parts.append("Открыто paper:\n" + "\n".join(opened))
+            self.tg.send("\n\n".join(parts))
         return summary
 
     def bootstrap(self) -> None:
