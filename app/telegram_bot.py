@@ -20,6 +20,18 @@ class TelegramBot:
         self._thread: threading.Thread | None = None
         self.command_handlers: dict[str, Callable[[str], str]] = {}
 
+    def set_commands(self, commands: list[dict[str, str]]) -> bool:
+        """Установить меню команд бота (кнопка слева от поля ввода)."""
+        try:
+            r = self.session.post(
+                f"{self.base}/setMyCommands",
+                json={"commands": commands},
+                timeout=20,
+            )
+            return bool(r.json().get("ok"))
+        except Exception:
+            return False
+
     def send(self, text: str, chat_id: str | None = None) -> bool:
         """Не бросает исключений: сбой уведомления не должен убивать торговый цикл."""
         cid = chat_id or self.s.telegram_chat_id
@@ -68,10 +80,15 @@ class TelegramBot:
         if handler:
             reply = handler(text)
         else:
-            reply = (
-                "Команды: /status /mode /pause /resume /watchlist /help\n"
-                f"Получено: {text[:100]}"
-            )
+            # Нет команды — передаём в LLM для диалога
+            fallback = self.command_handlers.get("_llm_chat")
+            if fallback:
+                reply = fallback(text)
+            else:
+                reply = (
+                    "Команды: /status /balance /mode /pause /resume /watchlist /help\n"
+                    f"Получено: {text[:100]}"
+                )
         self.send(reply, chat_id=chat_id)
 
     def start_polling(self) -> None:

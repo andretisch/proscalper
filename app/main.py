@@ -54,21 +54,72 @@ class ProScalpApp:
         self.tg.command_handlers = {
             "/help": lambda _: (
                 "ProScalp команды:\n"
-                "/status — состояние\n"
-                "/mode — paper/live\n"
+                "/status — состояние и баланс\n"
+                "/balance — текущий баланс\n"
+                "/mode — paper/live переключение\n"
                 "/pause — пауза сигналов\n"
                 "/resume — снять hard/soft стоп\n"
                 "/watchlist — текущий список\n"
-                "/scan — один цикл скана сейчас"
+                "/scan — один цикл скана сейчас\n"
+                "Или просто пиши вопрос — ИИ ответит"
             ),
             "/status": lambda _: self.status_text(),
-            "/mode": lambda _: f"Режим: {self.settings.mode} (переключение live — вручную в .env пока)",
+            "/balance": lambda _: self.balance_text(),
+            "/mode": self._cmd_mode,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
             "/watchlist": lambda _: "Watchlist: " + ", ".join(self.watchlist),
             "/scan": lambda _: self.run_once(notify=False) or "Скан выполнен. /status",
-            "/start": lambda _: "ProScalp на связи. /help",
+            "/start": lambda _: "ProScalp на связи. /help для списка команд.",
+            "_llm_chat": self._cmd_llm_chat,
         }
+        # Устанавливаем меню команд в Telegram
+        self.tg.set_commands([
+            {"command": "status", "description": "Состояние и баланс"},
+            {"command": "balance", "description": "Текущий баланс"},
+            {"command": "mode", "description": "Переключить paper/live"},
+            {"command": "watchlist", "description": "Список символов"},
+            {"command": "pause", "description": "Пауза сигналов"},
+            {"command": "resume", "description": "Снять паузу"},
+            {"command": "scan", "description": "Ручной скан"},
+            {"command": "help", "description": "Помощь"},
+        ])
+
+    def _cmd_mode(self, text: str) -> str:
+        """Переключение paper ↔ live или показ текущего режима."""
+        parts = text.strip().split()
+        if len(parts) == 1:
+            return (
+                f"Текущий режим: {self.settings.mode}\n"
+                f"Для переключения: /mode paper или /mode live"
+            )
+        target = parts[1].lower()
+        if target not in ("paper", "live"):
+            return "Укажи: /mode paper или /mode live"
+        if target == self.settings.mode:
+            return f"Уже в режиме {target}"
+        # Обновляем .env
+        env_path = self.settings.root / ".env"
+        try:
+            lines = env_path.read_text().splitlines()
+            new_lines = []
+            found = False
+            for line in lines:
+                if line.startswith("MODE="):
+                    new_lines.append(f"MODE={target}")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"MODE={target}")
+            env_path.write_text("\n".join(new_lines) + "\n")
+            return (
+                f"✅ Режим переключён: {self.settings.mode} → {target}\n"
+                f"⚠️ Перезапусти бота, чтобы изменения вступили в силу:\n"
+                f"tmux attach -t proscalp-bot, затем Ctrl+C и перезапуск"
+            )
+        except Exception as e:
+            return f"Ошибка записи .env: {e}"
 
     def _cmd_pause(self, _text: str) -> str:
         self.risk.paused_until = time.time() + 2 * 3600
@@ -78,12 +129,94 @@ class ProScalpApp:
         self.risk.manual_resume()
         return "Паузы сняты. Торговля по правилам разрешена."
 
+    def _cmd_llm_chat(self, question: str) -> str:
+        """Диалог с LLM: контекст стратегии + произвольный вопрос."""
+        stats = self.paper.journal.stats()
+        context = {
+            "mode": self.settings.mode,
+            "deposit_usdt": self.settings.deposit_usdt,
+            "leverage": self.settings.leverage,
+            "risk_per_trade_pct": self.settings.risk_per_trade_pct,
+            "max_parallel_symbols": self.settings.max_parallel_symbols,
+            "max_seconds_without_impulse": self.settings.max_seconds_without_impulse,
+            "taker_fee_rate": self.settings.taker_fee_rate_override * 100,
+            "watchlist": self.watchlist,
+            "open_trades": stats.get("open_trades"),
+            "closed_trades": stats.get("closed_trades"),
+            "winrate": stats.get("winrate"),
+            "pnl_usd_total": stats.get("pnl_usd_total"),
+            "day_pnl": self.risk.day_pnl,
+            "risk_status": self.risk.status(),
+        }
+        system = (
+            "Ты помощник трейдера, ведущего скальп-бота ProScalp по стратегии playbook S1–S5. "
+            "Отвечай на русском, кратко и по делу. "
+            "Контекст стратегии:\n"
+            f"{json.dumps(context, ensure_ascii=False, indent=2)}\n"
+            "Playbook: S1 true breakout, S2 false breakout от плотности, "
+            "S3 flip eaten volume, S4 in-play continuation, S5 post-listing drain short. "
+            "Ведение: стоп за структурой, BE после первого импульса, окно без импульса 90с, "
+            "запрет widen стопа, запрет усреднения, flat при снятой плотности."
+        )
+        try:
+            raw = self.ai.chat([
+                {"role": "system", "content": system},
+                {"role": "user", "content": question},
+            ])
+            return raw[:1500] if raw else "LLM не ответил"
+        except Exception as e:
+            return f"Ошибка LLM: {e}"
+
+    def balance_text(self) -> str:
+        """Баланс с учётом режима: paper показывает deposit, live — реальный."""
+        try:
+            if self.settings.mode == "paper":
+                balance = self.settings.deposit_usdt
+                equity = balance + self.risk.day_pnl
+                return (
+                    f"💼 Баланс (paper):\n"
+                    f"Депозит: {balance:.2f} USDT\n"
+                    f"Дневной PnL: {self.risk.day_pnl:+.2f} USDT\n"
+                    f"Эквити: {equity:.2f} USDT"
+                )
+            else:
+                wallet = self.bybit.wallet_balance()
+                balances = wallet.get("list") or []
+                if not balances:
+                    return "Не удалось получить баланс"
+                acc = balances[0]
+                total_equity = float(acc.get("totalEquity") or 0)
+                wallet_balance = float(acc.get("totalWalletBalance") or 0)
+                unrealized = float(acc.get("totalPerpUPL") or 0)
+                return (
+                    f"💼 Баланс (live testnet):\n"
+                    f"Баланс: {wallet_balance:.2f} USDT\n"
+                    f"Unrealized PnL: {unrealized:+.2f} USDT\n"
+                    f"Эквити: {total_equity:.2f} USDT"
+                )
+        except Exception as e:
+            return f"Ошибка получения баланса: {e}"
+
     def status_text(self) -> str:
         stats = self.paper.journal.stats()
         wr = stats.get("winrate")
         wr_s = f"{wr * 100:.1f}%" if wr is not None else "—"
+        balance_line = ""
+        try:
+            if self.settings.mode == "paper":
+                equity = self.settings.deposit_usdt + self.risk.day_pnl
+                balance_line = f"💼 paper equity={equity:.2f} USDT\n"
+            else:
+                wallet = self.bybit.wallet_balance()
+                balances = wallet.get("list") or []
+                if balances:
+                    total_equity = float(balances[0].get("totalEquity") or 0)
+                    balance_line = f"💼 live equity={total_equity:.2f} USDT\n"
+        except Exception:
+            pass
         return (
-            f"ProScalp status\n"
+            f"📊 ProScalp status\n"
+            f"{balance_line}"
             f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
             f"data={'mainnet' if self.settings.market_data_mainnet else 'testnet'} "
             f"taker={self.settings.taker_fee_rate_override * 100:.3f}%\n"
