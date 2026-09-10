@@ -31,6 +31,7 @@ class ProScalpApp:
             risk_per_trade_pct=self.settings.risk_per_trade_pct,
             daily_loss_limit_pct=self.settings.daily_loss_limit_pct,
             soft_pause_pct=self.settings.soft_pause_pct,
+            max_consecutive_losses=self.settings.max_consecutive_losses,
         )
         self.paper = PaperBroker(self.settings, self.risk)
         self.ai = OllamaClient(self.settings)
@@ -76,7 +77,8 @@ class ProScalpApp:
             f"ProScalp status\n"
             f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
             f"proxy={'on' if self.settings.proxy_enabled else 'off'}\n"
-            f"paper_hold={self.settings.paper_min_hold_sec}-{self.settings.paper_max_hold_sec}s\n"
+            f"no_impulse={self.settings.max_seconds_without_impulse}s "
+            f"max_open={self.settings.max_parallel_symbols}\n"
             f"risk={self.risk.status()} day_pnl={self.risk.day_pnl:.2f} USDT\n"
             f"watchlist={', '.join(self.watchlist)}\n"
             f"orderbook_snaps={self.store.count()}\n"
@@ -129,6 +131,12 @@ class ProScalpApp:
                     self.store.save(snap)
                     if mtype == "perp":
                         books[symbol] = snap
+                    elif symbol in books:
+                        books[symbol]["spot_wall"] = {
+                            "side": snap.get("wall_side"),
+                            "price": snap.get("wall_price"),
+                            "size": snap.get("wall_size"),
+                        }
                 except Exception:
                     continue
                 time.sleep(0.05)
@@ -139,7 +147,9 @@ class ProScalpApp:
         can, why = self.risk.can_open()
         books = self.collect_books()
         opened = []
-        closed, risk_events = self.paper.manage_open_trades(books)
+        closed, risk_events = self.paper.manage_open_trades(
+            books, decide_manage=self.ai.decide_manage
+        )
         skipped = []
         open_symbols = self.paper.open_symbols()
 
@@ -162,6 +172,9 @@ class ProScalpApp:
             for sig in signals[:1]:
                 if symbol in open_symbols:
                     skipped.append(f"{symbol}: already open")
+                    continue
+                if self.paper.open_count() >= self.settings.max_parallel_symbols:
+                    skipped.append(f"{symbol}: max_parallel={self.settings.max_parallel_symbols}")
                     continue
                 if not can:
                     skipped.append(f"{symbol}: risk block ({why})")

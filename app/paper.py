@@ -1,20 +1,25 @@
-"""Paper/shadow execution into journal."""
+"""Paper/shadow execution into journal — playbook open/manage/close."""
 
 from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
+from typing import Any, Callable
 
 from journal.service import Journal, OrderBookSnapshotIn, BookLevel
 
 from app.config import Settings
 from app.paper_exec import (
+    ManageState,
+    be_stop_price,
     entry_fill_price,
-    evaluate_exit,
+    evaluate_playbook,
+    exit_fill_price,
+    favorable_pct,
+    net_pnl_usd,
     round_trip_fees_usd,
-    take_price,
+    wall_snapshot,
 )
 from app.risk import RiskState
 from app.signals import Signal
@@ -29,6 +34,9 @@ class PaperBroker:
     def open_symbols(self) -> set[str]:
         return {t["symbol"] for t in self.journal.list_trades(status="open")}
 
+    def open_count(self) -> int:
+        return len(self.journal.list_trades(status="open"))
+
     def open_from_signal(
         self,
         signal: Signal,
@@ -40,7 +48,6 @@ class PaperBroker:
         taker_fee_rate: float,
     ) -> int:
         fill = entry_fill_price(book_snap, signal.side)
-        tp = take_price(fill, signal.side, signal.expected_move_pct, fee_roundtrip_pct)
         checklist = {
             "playbook_version": self.s.playbook_version,
             "mode": self.s.mode,
@@ -50,9 +57,10 @@ class PaperBroker:
                 "opened_at": time.time(),
                 "taker_fee_rate": taker_fee_rate,
                 "fee_rt_pct": fee_roundtrip_pct,
-                "expected_move_pct": signal.expected_move_pct,
-                "take_price": tp,
                 "entry_fill": fill,
+                "wall_at_entry": wall_snapshot(book_snap),
+                "impulse_seen": False,
+                "be_done": False,
             },
         }
         trade_id = self.journal.open_trade(
@@ -62,7 +70,7 @@ class PaperBroker:
             entry_price=fill,
             size=size,
             stop_price=signal.stop_price,
-            take_price=tp,
+            take_price=None,
             exchange="bybit",
             regime=signal.regime,
             notes=f"[paper] {signal.reason}",
@@ -88,9 +96,11 @@ class PaperBroker:
         return trade_id
 
     def manage_open_trades(
-        self, books: dict[str, dict[str, Any]]
+        self,
+        books: dict[str, dict[str, Any]],
+        *,
+        decide_manage: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Check stops, targets, timeouts; close with fees."""
         closed: list[str] = []
         risk_events: list[str] = []
         now = time.time()
@@ -99,38 +109,113 @@ class PaperBroker:
             snap = books.get(symbol)
             if not snap:
                 continue
-            meta = self._exec_meta(trade)
+            checklist, meta = self._checklist(trade)
             age = now - float(meta["opened_at"])
-            decision = evaluate_exit(
+            state = ManageState(
+                impulse_seen=bool(meta.get("impulse_seen")),
+                be_done=bool(meta.get("be_done")),
+            )
+            taker = float(meta["taker_fee_rate"])
+            fee_rt = float(meta["fee_rt_pct"])
+            decision = evaluate_playbook(
+                setup_id=str(trade["setup_id"]),
                 side=trade["side"],
                 entry_price=float(trade["entry_price"]),
                 stop_price=trade.get("stop_price"),
-                take_px=trade.get("take_price") or meta.get("take_price"),
                 snap=snap,
                 age_sec=age,
-                min_hold_sec=self.s.paper_min_hold_sec,
-                max_hold_sec=self.s.paper_max_hold_sec,
-                fee_roundtrip_pct=float(meta["fee_rt_pct"]),
+                wall_at_entry=meta.get("wall_at_entry"),
+                state=state,
+                fee_roundtrip_pct=fee_rt,
+                taker_rate=taker,
+                max_seconds_without_impulse=self.s.max_seconds_without_impulse,
             )
-            if not decision:
+
+            if decision.action == "be" and decision.new_stop is not None:
+                self.journal.tighten_stop(
+                    int(trade["id"]), decision.new_stop, side=trade["side"]
+                )
+                meta["impulse_seen"] = True
+                meta["be_done"] = True
+                checklist["paper_exec"] = meta
+                self.journal.update_checklist(int(trade["id"]), checklist)
                 continue
-            exit_px, reason = decision
+
+            if decision.action == "hold" and decide_manage is not None:
+                mark = exit_fill_price(snap, trade["side"])
+                view = {
+                    "trade_id": trade["id"],
+                    "symbol": symbol,
+                    "setup_id": trade["setup_id"],
+                    "side": trade["side"],
+                    "regime": trade.get("regime"),
+                    "entry": trade["entry_price"],
+                    "stop": trade.get("stop_price"),
+                    "age_sec": round(age, 1),
+                    "impulse_seen": state.impulse_seen,
+                    "be_done": state.be_done,
+                    "favorable_pct": round(
+                        favorable_pct(trade["side"], float(trade["entry_price"]), snap),
+                        4,
+                    ),
+                    "wall_now": wall_snapshot(snap),
+                    "wall_at_entry": meta.get("wall_at_entry"),
+                    "fee_rt_pct": fee_rt,
+                    "pnl_if_exit_now": round(
+                        net_pnl_usd(
+                            side=trade["side"],
+                            entry_price=float(trade["entry_price"]),
+                            exit_price=mark,
+                            size=float(trade["size"]),
+                            taker_rate=taker,
+                        ),
+                        4,
+                    ),
+                }
+                try:
+                    llm = decide_manage(view)
+                except Exception as e:
+                    llm = {"action": "hold", "comment": f"llm_error:{e}"}
+                action = str(llm.get("action") or "hold").lower()
+                comment = str(llm.get("comment") or "")
+                if action in {"flatten", "close", "exit", "flat"}:
+                    decision.action = "flatten"
+                    decision.reason = f"llm_flatten:{comment[:80]}"
+                    decision.exit_price = mark
+                    decision.mechanical = False
+                elif action in {"be", "breakeven"} and not state.be_done:
+                    be = be_stop_price(trade["side"], float(trade["entry_price"]), taker)
+                    self.journal.tighten_stop(int(trade["id"]), be, side=trade["side"])
+                    meta["be_done"] = True
+                    meta["impulse_seen"] = True
+                    checklist["paper_exec"] = meta
+                    self.journal.update_checklist(int(trade["id"]), checklist)
+                    continue
+
+            if decision.action != "flatten" or decision.exit_price is None:
+                meta["impulse_seen"] = state.impulse_seen
+                meta["be_done"] = state.be_done
+                checklist["paper_exec"] = meta
+                self.journal.update_checklist(int(trade["id"]), checklist)
+                continue
+
             fees = round_trip_fees_usd(
                 float(trade["entry_price"]),
-                exit_px,
+                float(decision.exit_price),
                 float(trade["size"]),
-                float(meta["taker_fee_rate"]),
+                taker,
             )
             result = self.close_trade(
                 int(trade["id"]),
-                exit_price=exit_px,
-                reason=reason,
+                exit_price=float(decision.exit_price),
+                reason=decision.reason,
                 fees_usd=fees,
             )
             risk_events.extend(result.get("risk_events") or [])
             closed.append(
                 f"#{trade['id']} {symbol} {trade['setup_id']} {trade['side']} "
-                f"pnl={result.get('pnl_usd'):.4f} fee={fees:.4f} ({reason})"
+                f"pnl={float(result.get('pnl_usd') or 0):.4f} fee={fees:.4f} "
+                f"({decision.reason})"
             )
         return closed, risk_events
 
@@ -158,9 +243,8 @@ class PaperBroker:
         result["risk_events"] = events
         return result
 
-    @staticmethod
-    def _exec_meta(trade: dict[str, Any]) -> dict[str, Any]:
-        checklist = {}
+    def _checklist(self, trade: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        checklist: dict[str, Any] = {}
         raw = trade.get("checklist_json")
         if raw:
             try:
@@ -176,5 +260,8 @@ class PaperBroker:
                 meta["opened_at"] = time.time()
         meta.setdefault("taker_fee_rate", 0.00055)
         meta.setdefault("fee_rt_pct", 0.11)
-        meta.setdefault("take_price", trade.get("take_price"))
-        return meta
+        meta.setdefault("impulse_seen", False)
+        meta.setdefault("be_done", False)
+        meta.setdefault("wall_at_entry", None)
+        checklist["paper_exec"] = meta
+        return checklist, meta

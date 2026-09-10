@@ -52,9 +52,10 @@ class Settings:
     http_proxy: str
     https_proxy: str
     no_proxy: str
-    paper_max_hold_sec: int
-    paper_min_hold_sec: int
     paper_fee_buffer_mult: float
+    max_seconds_without_impulse: int
+    max_parallel_symbols: int
+    max_consecutive_losses: int
 
     @property
     def proxy_enabled(self) -> bool:
@@ -98,9 +99,12 @@ def load_settings() -> Settings:
         http_proxy=os.getenv("HTTP_PROXY", "").strip(),
         https_proxy=os.getenv("HTTPS_PROXY", "").strip(),
         no_proxy=os.getenv("NO_PROXY", "").strip(),
-        paper_max_hold_sec=int(_float(os.getenv("PAPER_MAX_HOLD_SEC"), 120)),
-        paper_min_hold_sec=int(_float(os.getenv("PAPER_MIN_HOLD_SEC"), 15)),
         paper_fee_buffer_mult=_float(os.getenv("PAPER_FEE_BUFFER_MULT"), 3.0),
+        max_seconds_without_impulse=int(
+            _float(os.getenv("MAX_SECONDS_WITHOUT_IMPULSE"), 90)
+        ),
+        max_parallel_symbols=int(_float(os.getenv("MAX_PARALLEL_SYMBOLS"), 2)),
+        max_consecutive_losses=int(_float(os.getenv("MAX_CONSECUTIVE_LOSSES"), 3)),
     )
     from app.http_client import apply_proxy_env
 

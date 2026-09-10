@@ -17,6 +17,7 @@ class RiskState:
     paused_until: float = 0.0
     hard_stopped_until: float = 0.0
     consecutive_losses: int = 0
+    max_consecutive_losses: int = 3
 
     def _roll_day(self) -> None:
         if time.time() - self.day_start_ts >= 86400:
@@ -66,6 +67,13 @@ class RiskState:
             self.hard_stopped_until = time.time() + 86400
             events.append("hard_stop")
         elif self.day_pnl <= soft and self.paused_until < time.time():
+            self.paused_until = time.time() + 2 * 3600
+            events.append("soft_pause")
+        elif (
+            self.max_consecutive_losses > 0
+            and self.consecutive_losses >= self.max_consecutive_losses
+            and self.paused_until < time.time()
+        ):
             self.paused_until = time.time() + 2 * 3600
             events.append("soft_pause")
         return events

@@ -332,6 +332,59 @@ class Journal:
                 "exit_reason": exit_reason,
             }
 
+    def tighten_stop(
+        self, trade_id: int, new_stop: float, *, side: str | None = None
+    ) -> float:
+        """Move stop only toward breakeven / profit. Widen is forbidden."""
+        with connect(self.db_path) as conn:
+            trade = conn.execute(
+                "SELECT * FROM trades WHERE id = ?", (trade_id,)
+            ).fetchone()
+            if not trade:
+                raise KeyError(f"trade {trade_id} not found")
+            if trade["status"] != "open":
+                raise ValueError(f"trade {trade_id} already {trade['status']}")
+            side = (side or trade["side"]).lower()
+            old = trade["stop_price"]
+            new_stop = float(new_stop)
+            if old is not None:
+                old = float(old)
+                if side == "long" and new_stop < old:
+                    return old
+                if side == "short" and new_stop > old:
+                    return old
+            conn.execute(
+                """
+                UPDATE trades SET stop_price = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (new_stop, trade_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_events (trade_id, ts, event_type, payload_json)
+                VALUES (?, ?, 'stop_tighten', ?)
+                """,
+                (
+                    trade_id,
+                    utc_now(),
+                    json.dumps({"old": old, "new": new_stop}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return new_stop
+
+    def update_checklist(self, trade_id: int, checklist: dict[str, Any]) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE trades SET checklist_json = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (json.dumps(checklist, ensure_ascii=False), trade_id),
+            )
+            conn.commit()
+
     def save_orderbook(self, snap: OrderBookSnapshotIn) -> int:
         if not snap.bids or not snap.asks:
             raise ValueError("bids and asks must be non-empty")
