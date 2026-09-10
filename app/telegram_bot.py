@@ -21,15 +21,23 @@ class TelegramBot:
         self.command_handlers: dict[str, Callable[[str], str]] = {}
 
     def send(self, text: str, chat_id: str | None = None) -> bool:
+        """Не бросает исключений: сбой уведомления не должен убивать торговый цикл."""
         cid = chat_id or self.s.telegram_chat_id
         if not cid or not self.s.telegram_token:
             return False
-        r = self.session.post(
-            f"{self.base}/sendMessage",
-            json={"chat_id": cid, "text": text[:4000]},
-            timeout=30,
-        )
-        return bool(r.json().get("ok"))
+        for attempt in range(3):
+            try:
+                r = self.session.post(
+                    f"{self.base}/sendMessage",
+                    json={"chat_id": cid, "text": text[:4000]},
+                    timeout=30,
+                )
+                return bool(r.json().get("ok"))
+            except Exception:
+                if attempt == 2:
+                    return False
+                time.sleep(2 * (attempt + 1))
+        return False
 
     def get_updates(self) -> list[dict]:
         r = self.session.get(
