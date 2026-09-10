@@ -72,6 +72,7 @@ class ProScalpApp:
         return (
             f"ProScalp status\n"
             f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
+            f"proxy={'on' if self.settings.proxy_enabled else 'off'}\n"
             f"risk={self.risk.status()} day_pnl={self.risk.day_pnl:.2f} USDT\n"
             f"watchlist={', '.join(self.watchlist)}\n"
             f"orderbook_snaps={self.store.count()}\n"

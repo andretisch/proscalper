@@ -9,15 +9,14 @@ import time
 from typing import Any
 from urllib.parse import urlencode
 
-import requests
-
 from app.config import Settings
+from app.http_client import make_session
 
 
 class BybitClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
-        self.session = requests.Session()
+        self.session = make_session(settings)
         self.session.headers.update({"Content-Type": "application/json"})
 
     def _sign(self, payload: str, ts: str, recv: str) -> str:

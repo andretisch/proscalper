@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import requests
-
 from app.config import Settings
+from app.http_client import make_session
 
 
 class OllamaClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
+        self.session = make_session(settings)
 
     def chat(self, messages: list[dict[str, str]], timeout: int = 60) -> str:
         url = f"{self.s.ollama_host}/api/chat"
@@ -21,7 +21,7 @@ class OllamaClient:
             "messages": messages,
             "stream": False,
         }
-        r = requests.post(
+        r = self.session.post(
             url,
             headers={
                 "Authorization": f"Bearer {self.s.ollama_key}",

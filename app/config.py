@@ -48,6 +48,14 @@ class Settings:
     email_smtp_port: int
     email_from: str
     email_to: str
+    proxy_url: str
+    http_proxy: str
+    https_proxy: str
+    no_proxy: str
+
+    @property
+    def proxy_enabled(self) -> bool:
+        return bool(self.proxy_url or self.http_proxy or self.https_proxy)
 
     @property
     def bybit_base(self) -> str:
@@ -61,7 +69,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    return Settings(
+    settings = Settings(
         root=ROOT,
         mode=os.getenv("MODE", "paper").strip().lower(),
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
@@ -83,4 +91,12 @@ def load_settings() -> Settings:
         email_smtp_port=int(_float(os.getenv("EMAIL_SMTP_PORT"), 587)),
         email_from=os.getenv("EMAIL_FROM", "").strip(),
         email_to=os.getenv("EMAIL_TO", "").strip(),
+        proxy_url=os.getenv("PROXY_URL", "").strip(),
+        http_proxy=os.getenv("HTTP_PROXY", "").strip(),
+        https_proxy=os.getenv("HTTPS_PROXY", "").strip(),
+        no_proxy=os.getenv("NO_PROXY", "").strip(),
     )
+    from app.http_client import apply_proxy_env
+
+    apply_proxy_env(settings)
+    return settings
