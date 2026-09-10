@@ -30,9 +30,15 @@ class PaperBroker:
         self.s = settings
         self.risk = risk
         self.journal = Journal(settings.root / "data" / "journal" / "journal.sqlite3")
+        self._cooldown: dict[str, float] = {}
 
     def open_symbols(self) -> set[str]:
         return {t["symbol"] for t in self.journal.list_trades(status="open")}
+
+    def cooldown_left(self, symbol: str) -> float:
+        """Anti-churn: no immediate re-entry into the same level after an exit."""
+        until = self._cooldown.get(symbol, 0.0)
+        return max(0.0, until - time.time())
 
     def open_count(self) -> int:
         return len(self.journal.list_trades(status="open"))
@@ -141,7 +147,10 @@ class PaperBroker:
                 self.journal.update_checklist(int(trade["id"]), checklist)
                 continue
 
-            if decision.action == "hold" and decide_manage is not None:
+            # Playbook gives a setup its impulse window before discretionary exit;
+            # structural invalidation above already handled the urgent cases.
+            llm_gate = age >= self.s.max_seconds_without_impulse * 0.5
+            if decision.action == "hold" and decide_manage is not None and llm_gate:
                 mark = exit_fill_price(snap, trade["side"])
                 view = {
                     "trade_id": trade["id"],
@@ -161,6 +170,7 @@ class PaperBroker:
                     "wall_now": wall_snapshot(snap),
                     "wall_at_entry": meta.get("wall_at_entry"),
                     "fee_rt_pct": fee_rt,
+                    "no_impulse_window_sec": self.s.max_seconds_without_impulse,
                     "pnl_if_exit_now": round(
                         net_pnl_usd(
                             side=trade["side"],
@@ -212,6 +222,7 @@ class PaperBroker:
                 fees_usd=fees,
             )
             risk_events.extend(result.get("risk_events") or [])
+            self._cooldown[symbol] = time.time() + self.s.symbol_cooldown_sec
             closed.append(
                 f"#{trade['id']} {symbol} {trade['setup_id']} {trade['side']} "
                 f"pnl={float(result.get('pnl_usd') or 0):.4f} fee={fees:.4f} "

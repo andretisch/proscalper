@@ -37,7 +37,7 @@ class BybitClient:
 
     def get_public(self, path: str, params: dict[str, Any] | None = None) -> dict:
         r = self.session.get(
-            f"{self.s.bybit_base}{path}", params=params or {}, timeout=20
+            f"{self.s.bybit_public_base}{path}", params=params or {}, timeout=20
         )
         r.raise_for_status()
         data = r.json()
