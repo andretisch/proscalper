@@ -1,0 +1,30 @@
+{
+  "symbol": "BTCUSDT",
+  "exchange": "bybit",
+  "market_type": "perp",
+  "ts": "2026-09-10T10:00:00+00:00",
+  "label": "before_entry",
+  "bids": [
+    {"price": 21800.0, "size": 12.5},
+    {"price": 21799.5, "size": 1.2},
+    {"price": 21799.0, "size": 0.8},
+    {"price": 21798.0, "size": 2.1}
+  ],
+  "asks": [
+    {"price": 21800.5, "size": 0.9},
+    {"price": 21801.0, "size": 1.4},
+    {"price": 21802.0, "size": 3.0},
+    {"price": 21805.0, "size": 0.5}
+  ],
+  "wall": {
+    "side": "bid",
+    "price": 21800.0,
+    "size": 12.5,
+    "age_sec": 940,
+    "remaining_pct": 100
+  },
+  "meta": {
+    "note": "пример плотности на круглом числе",
+    "source": "manual"
+  }
+}

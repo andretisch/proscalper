@@ -1,0 +1,152 @@
+{
+  "version": "0.1",
+  "source": "data/reports + data/transcripts_clean",
+  "goal": "Formal rules for automating the playlist trader style",
+  "market_regimes": [
+    {
+      "id": "range",
+      "prefer_setups": ["S2_false_breakout_density"],
+      "refs": ["ep01", "ep06", "ep07"]
+    },
+    {
+      "id": "trend_in_play",
+      "prefer_setups": ["S1_true_breakout", "S4_active_continuation"],
+      "refs": ["ep03", "ep13", "ep14", "ep17", "ep18"]
+    },
+    {
+      "id": "post_listing_drain",
+      "prefer_setups": ["S5_drain_short"],
+      "refs": ["ep05", "ep14", "ep17"]
+    }
+  ],
+  "setups": [
+    {
+      "id": "S1_true_breakout",
+      "name": "Истинный пробой уровня / консолидации",
+      "entry": [
+        "clear_level_or_consolidation",
+        "touch_count_ preferably_gte_5",
+        "squeeze_or_compression",
+        "prefer_in_play_symbol",
+        "optional_round_number_or_wall_beyond_level",
+        "split_retest_plus_add_on_break"
+      ],
+      "confirm": ["impulse_after_break", "optional_wall_eaten_on_path"],
+      "stop": ["beyond_level_or_opposing_wall", "move_to_be_after_impulse"],
+      "exit": ["partial_on_first_impulse", "runner_with_be_or_time_stop"],
+      "invalidate": ["no_impulse", "back_into_range"],
+      "refs": ["ep01", "ep03", "ep07", "ep11", "ep13", "ep14", "ep17", "ep18"]
+    },
+    {
+      "id": "S2_false_breakout_density",
+      "name": "Ложный пробой / отскок от плотности",
+      "entry": [
+        "large_limit_spot_or_perp",
+        "touch_or_spike_into_wall",
+        "do_not_enter_before_touch",
+        "limit_slightly_before_wall",
+        "prefer_aged_wall_and_round_number"
+      ],
+      "confirm": ["rejection_from_wall", "tape_reversal"],
+      "stop": ["hard_beyond_wall", "flatten_if_wall_moved_do_not_trail"],
+      "exit": ["first_pullback_or_retest", "often_full_flat_on_retest"],
+      "invalidate": ["wall_pulled", "wall_eaten_below_threshold"],
+      "may_transition_to": "S3_flip_eaten_volume",
+      "refs": ["ep01", "ep02", "ep06", "ep09", "ep10", "ep12"]
+    },
+    {
+      "id": "S3_flip_eaten_volume",
+      "name": "Переворот при разъедании объёма",
+      "entry": [
+        "had_fade_from_wall",
+        "remaining_size_falling",
+        "tape_aggression_through_wall",
+        "close_fade_then_enter_break_direction"
+      ],
+      "stop": ["beyond_broken_wall"],
+      "exit": ["partial_plus_be_on_impulse"],
+      "refs": ["ep01", "ep09", "ep10", "ep12", "ep17"]
+    },
+    {
+      "id": "S4_active_continuation",
+      "name": "Continuation на активной монете",
+      "entry": [
+        "in_play_score_high",
+        "consolidation_after_impulse",
+        "trade_with_pump_trend",
+        "split_or_impulse_only_if_fast_approach"
+      ],
+      "stop": ["beyond_consolidation_extreme", "no_widen"],
+      "exit": ["main_size_on_first_impulse"],
+      "refs": ["ep13", "ep14", "ep17", "ep18"]
+    },
+    {
+      "id": "S5_drain_short",
+      "name": "Drain / post-listing стек",
+      "entry": ["strong_dump_or_listing_bleed", "console_then_break_lows"],
+      "stop_exit": "same_as_S1_down",
+      "refs": ["ep05", "ep14", "ep17", "ep18"]
+    },
+    {
+      "id": "S6_naked_density_micro",
+      "name": "Голый объём (эксперимент)",
+      "default_enabled": false,
+      "note": "ep10 experiment R:R~1:6; not production default",
+      "refs": ["ep10"]
+    }
+  ],
+  "risk": {
+    "stop_beyond_structure": true,
+    "forbid_stop_widen": true,
+    "auto_be_after_impulse": true,
+    "no_impulse_exit": true,
+    "max_parallel_symbols": 2,
+    "require_exchange_sl_for_overnight": true,
+    "flatten_on_missing_heartbeat": true,
+    "size_from_stop_distance": true,
+    "refs": ["ep01", "ep03", "ep08", "ep14"]
+  },
+  "filters": {
+    "require_in_play_for_S4": true,
+    "skip_fresh_walls": true,
+    "skip_empty_book": true,
+    "skip_blurry_levels": true,
+    "skip_third_fade_same_wall": true,
+    "prefer_aged_large_walls": true
+  },
+  "forbidden": [
+    "move_stop_away",
+    "average_down_tilt",
+    "unattended_large_size",
+    "revenge_trading",
+    "foma_chase",
+    "overtrade_without_setup",
+    "oversit_false_breakout_remainder",
+    "multi_ticker_without_priority",
+    "side_or_size_misclick_without_confirm"
+  ],
+  "metrics_mentioned": {
+    "experiment_rr_approx": "1:6",
+    "experiment_wr_days": ["~26%", "~58%"],
+    "source_episode": "ep10",
+    "note": "Only author-stated stats; not a guaranteed expectancy model"
+  },
+  "data_required": [
+    "l2_spot_perp",
+    "wall_age_remaining_eat_rate",
+    "level_touch_count",
+    "breakout_trigger",
+    "impulse_detector",
+    "tape_imbalance",
+    "in_play_score",
+    "regime_classifier",
+    "session_risk_state",
+    "heartbeat"
+  ],
+  "rollout": [
+    "alerts_only_S1_S2",
+    "semi_auto_stops_be_time_exit",
+    "auto_S1_S2_one_two_symbols",
+    "add_S3_flip_and_S4_screener"
+  ]
+}

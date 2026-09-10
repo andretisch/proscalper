@@ -1,0 +1,70 @@
+# --- secrets / local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+**/api_keys*
+
+# --- Python ---
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+eggs/
+*.egg-info/
+*.egg
+.venv/
+venv/
+ENV/
+logs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# --- journals / runtime DB ---
+data/journal/*.sqlite3
+data/journal/*.sqlite3-*
+data/journal/*.db
+*.sqlite3
+*.sqlite3-*
+
+# --- accumulated market data (large) ---
+data/orderbook/
+data/market/
+data/history/
+data/raw/
+*.parquet
+*.feather
+*.pkl
+*.pickle
+
+# --- logs ---
+logs/
+*.log
+*.log.*
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Jupyter / misc ---
+.ipynb_checkpoints/
+tmp/
+temp/
+.cache/
