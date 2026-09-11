@@ -630,10 +630,17 @@ class ProScalpApp:
             ])
         )
 
-    def run_forever(self, interval_sec: int = 60) -> None:
+    def run_forever(self, interval_sec: float | None = None) -> None:
+        pause = (
+            interval_sec
+            if interval_sec is not None
+            else self.settings.cycle_interval_sec
+        )
         self.log.info(
-            "старт: mode=%s окно_импульса=%sс комиссия<=%.0f%%_риска watchdog=%.0fс",
+            "старт: mode=%s пауза_между_сканами=%.0fс окно_импульса=%sс "
+            "комиссия<=%.0f%%_риска watchdog=%.0fс",
             self.settings.mode,
+            pause,
             self.settings.max_seconds_without_impulse,
             self.settings.max_fee_share_of_risk * 100,
             self.settings.watchdog_timeout_sec,
@@ -667,7 +674,7 @@ class ProScalpApp:
 
         last_watch = time.time()
         while self.running:
-            time.sleep(interval_sec)
+            time.sleep(pause)
             try:
                 if time.time() - last_watch > 3600:
                     self.prune_history()
@@ -688,7 +695,7 @@ class ProScalpApp:
 
 def main() -> None:
     app = ProScalpApp()
-    app.run_forever(interval_sec=90)
+    app.run_forever()
 
 
 if __name__ == "__main__":
