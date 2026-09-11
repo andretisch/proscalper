@@ -9,15 +9,14 @@ import time
 from typing import Any
 from urllib.parse import urlencode
 
-import requests
-
 from app.config import Settings
+from app.http_client import make_session
 
 
 class BybitClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
-        self.session = requests.Session()
+        self.session = make_session(settings)
         self.session.headers.update({"Content-Type": "application/json"})
 
     def _sign(self, payload: str, ts: str, recv: str) -> str:
@@ -38,7 +37,7 @@ class BybitClient:
 
     def get_public(self, path: str, params: dict[str, Any] | None = None) -> dict:
         r = self.session.get(
-            f"{self.s.bybit_base}{path}", params=params or {}, timeout=20
+            f"{self.s.bybit_public_base}{path}", params=params or {}, timeout=20
         )
         r.raise_for_status()
         data = r.json()
@@ -70,6 +69,24 @@ class BybitClient:
             "/v5/market/orderbook",
             {"category": category, "symbol": symbol, "limit": limit},
         )
+
+    def klines(
+        self,
+        symbol: str,
+        category: str = "linear",
+        interval: str = "1",
+        limit: int = 15,
+    ) -> list[list[str]]:
+        result = self.get_public(
+            "/v5/market/kline",
+            {
+                "category": category,
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit,
+            },
+        )
+        return result.get("list") or []
 
     def tickers(self, category: str = "linear", symbol: str | None = None) -> list:
         params: dict[str, Any] = {"category": category}

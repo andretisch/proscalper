@@ -249,8 +249,10 @@ class Journal:
         exit_ts: str | None = None,
         exit_reason: str | None = None,
         notes: str | None = None,
+        fees_usd: float = 0.0,
     ) -> dict[str, Any]:
         ts = exit_ts or utc_now()
+        fees_usd = max(float(fees_usd), 0.0)
         with connect(self.db_path) as conn:
             trade = conn.execute(
                 "SELECT * FROM trades WHERE id = ?", (trade_id,)
@@ -264,9 +266,10 @@ class Journal:
             size = float(trade["size"])
             side = trade["side"]
             if side == "long":
-                pnl = (float(exit_price) - entry) * size
+                gross_pnl = (float(exit_price) - entry) * size
             else:
-                pnl = (entry - float(exit_price)) * size
+                gross_pnl = (entry - float(exit_price)) * size
+            pnl = gross_pnl - fees_usd
 
             pnl_r = None
             if trade["stop_price"] is not None:
@@ -308,6 +311,8 @@ class Journal:
                     json.dumps(
                         {
                             "exit_price": exit_price,
+                            "gross_pnl_usd": gross_pnl,
+                            "fees_usd": fees_usd,
                             "pnl_usd": pnl,
                             "pnl_r": pnl_r,
                             "exit_reason": exit_reason,
@@ -319,10 +324,66 @@ class Journal:
             conn.commit()
             return {
                 "trade_id": trade_id,
+                "gross_pnl_usd": gross_pnl,
+                "fees_usd": fees_usd,
                 "pnl_usd": pnl,
                 "pnl_r": pnl_r,
                 "exit_price": exit_price,
+                "exit_reason": exit_reason,
             }
+
+    def tighten_stop(
+        self, trade_id: int, new_stop: float, *, side: str | None = None
+    ) -> float:
+        """Move stop only toward breakeven / profit. Widen is forbidden."""
+        with connect(self.db_path) as conn:
+            trade = conn.execute(
+                "SELECT * FROM trades WHERE id = ?", (trade_id,)
+            ).fetchone()
+            if not trade:
+                raise KeyError(f"trade {trade_id} not found")
+            if trade["status"] != "open":
+                raise ValueError(f"trade {trade_id} already {trade['status']}")
+            side = (side or trade["side"]).lower()
+            old = trade["stop_price"]
+            new_stop = float(new_stop)
+            if old is not None:
+                old = float(old)
+                if side == "long" and new_stop < old:
+                    return old
+                if side == "short" and new_stop > old:
+                    return old
+            conn.execute(
+                """
+                UPDATE trades SET stop_price = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (new_stop, trade_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_events (trade_id, ts, event_type, payload_json)
+                VALUES (?, ?, 'stop_tighten', ?)
+                """,
+                (
+                    trade_id,
+                    utc_now(),
+                    json.dumps({"old": old, "new": new_stop}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return new_stop
+
+    def update_checklist(self, trade_id: int, checklist: dict[str, Any]) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE trades SET checklist_json = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (json.dumps(checklist, ensure_ascii=False), trade_id),
+            )
+            conn.commit()
 
     def save_orderbook(self, snap: OrderBookSnapshotIn) -> int:
         if not snap.bids or not snap.asks:

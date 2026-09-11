@@ -48,6 +48,35 @@ class Settings:
     email_smtp_port: int
     email_from: str
     email_to: str
+    proxy_url: str
+    http_proxy: str
+    https_proxy: str
+    no_proxy: str
+    paper_fee_buffer_mult: float
+    max_seconds_without_impulse: int
+    max_parallel_symbols: int
+    max_consecutive_losses: int
+    market_data_mainnet: bool
+    wall_max_dist_pct: float
+    taker_fee_rate_override: float
+    symbol_cooldown_sec: int
+    book_depth_limit: int
+    wall_scan_pct: float
+    wall_min_dist_pct: float
+    wall_min_depth_share: float
+    wall_min_ratio: float
+    wall_min_observations: int
+    wall_min_age_sec: float
+    wall_min_held_share: float
+    wall_approach_pct: float
+    min_rr: float
+    room_window_sec: float
+    min_turnover_usd: float
+    min_range24_pct: float
+
+    @property
+    def proxy_enabled(self) -> bool:
+        return bool(self.proxy_url or self.http_proxy or self.https_proxy)
 
     @property
     def bybit_base(self) -> str:
@@ -56,12 +85,19 @@ class Settings:
         return "https://api.bybit.com"
 
     @property
+    def bybit_public_base(self) -> str:
+        """Источник рыночных данных: стакан testnet синтетический и для сетапов непригоден."""
+        if self.market_data_mainnet:
+            return "https://api.bybit.com"
+        return self.bybit_base
+
+    @property
     def soft_pause_pct(self) -> float:
         return self.daily_loss_limit_pct * 0.5
 
 
 def load_settings() -> Settings:
-    return Settings(
+    settings = Settings(
         root=ROOT,
         mode=os.getenv("MODE", "paper").strip().lower(),
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
@@ -83,4 +119,35 @@ def load_settings() -> Settings:
         email_smtp_port=int(_float(os.getenv("EMAIL_SMTP_PORT"), 587)),
         email_from=os.getenv("EMAIL_FROM", "").strip(),
         email_to=os.getenv("EMAIL_TO", "").strip(),
+        proxy_url=os.getenv("PROXY_URL", "").strip(),
+        http_proxy=os.getenv("HTTP_PROXY", "").strip(),
+        https_proxy=os.getenv("HTTPS_PROXY", "").strip(),
+        no_proxy=os.getenv("NO_PROXY", "").strip(),
+        paper_fee_buffer_mult=_float(os.getenv("PAPER_FEE_BUFFER_MULT"), 3.0),
+        max_seconds_without_impulse=int(
+            _float(os.getenv("MAX_SECONDS_WITHOUT_IMPULSE"), 90)
+        ),
+        max_parallel_symbols=int(_float(os.getenv("MAX_PARALLEL_SYMBOLS"), 2)),
+        max_consecutive_losses=int(_float(os.getenv("MAX_CONSECUTIVE_LOSSES"), 3)),
+        market_data_mainnet=_bool(os.getenv("MARKET_DATA_MAINNET"), True),
+        wall_max_dist_pct=_float(os.getenv("WALL_MAX_DIST_PCT"), 0.45),
+        taker_fee_rate_override=_float(os.getenv("TAKER_FEE_RATE"), 0.00055),
+        symbol_cooldown_sec=int(_float(os.getenv("SYMBOL_COOLDOWN_SEC"), 600)),
+        book_depth_limit=int(_float(os.getenv("BOOK_DEPTH_LIMIT"), 200)),
+        wall_scan_pct=_float(os.getenv("WALL_SCAN_PCT"), 0.6),
+        wall_min_dist_pct=_float(os.getenv("WALL_MIN_DIST_PCT"), 0.02),
+        wall_min_depth_share=_float(os.getenv("WALL_MIN_DEPTH_SHARE"), 0.15),
+        wall_min_ratio=_float(os.getenv("WALL_MIN_RATIO"), 8.0),
+        wall_min_observations=int(_float(os.getenv("WALL_MIN_OBSERVATIONS"), 2)),
+        wall_min_age_sec=_float(os.getenv("WALL_MIN_AGE_SEC"), 45.0),
+        wall_min_held_share=_float(os.getenv("WALL_MIN_HELD_SHARE"), 0.6),
+        wall_approach_pct=_float(os.getenv("WALL_APPROACH_PCT"), 0.12),
+        min_rr=_float(os.getenv("MIN_RR"), 1.5),
+        room_window_sec=_float(os.getenv("ROOM_WINDOW_SEC"), 900.0),
+        min_turnover_usd=_float(os.getenv("MIN_TURNOVER_USD"), 20_000_000.0),
+        min_range24_pct=_float(os.getenv("MIN_RANGE24_PCT"), 3.0),
     )
+    from app.http_client import apply_proxy_env
+
+    apply_proxy_env(settings)
+    return settings

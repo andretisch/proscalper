@@ -14,6 +14,7 @@ from app.main import ProScalpApp  # noqa: E402
 
 def main() -> None:
     app = ProScalpApp()
+    print("proxy_enabled", app.settings.proxy_enabled)
     print("bybit_time", app.bybit.server_time().get("timeSecond"))
     wb = app.bybit.wallet_balance()
     print("wallet_ok", bool(wb))
