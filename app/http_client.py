@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import re
 import socket
 import threading
 import time
@@ -18,19 +17,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from app.logging_setup import get_logger
+from app.logging_setup import get_logger, redact
 
 if TYPE_CHECKING:
     from app.config import Settings
 
 log = get_logger("http")
-
-# Токен Telegram лежит прямо в URL, а текст ошибки печатает URL целиком.
-_SECRET_IN_URL = re.compile(r"/bot\d+:[\w-]+")
-
-
-def redact(text: object) -> str:
-    return _SECRET_IN_URL.sub("/bot<токен>", str(text))
 
 
 def requests_proxies(settings: Settings) -> dict[str, str] | None:
@@ -77,8 +69,10 @@ def make_session(settings: Settings) -> requests.Session:
     proxies = requests_proxies(settings)
     if proxies:
         session.proxies.update(proxies)
-    # Повторы на уровне пула включены только для GET: POST может создать
-    # ордер или сообщение, и повтор после потерянного ответа задвоит его.
+    # Повторы по коду ответа и по таймауту чтения разрешены только для GET:
+    # POST может создать сообщение или ордер, и повтор после потерянного
+    # ответа задвоит его. Оборванное соединение urllib3 повторяет для любого
+    # метода — там запрос до сервера, как правило, не доехал.
     retry = Retry(
         total=2,
         connect=2,

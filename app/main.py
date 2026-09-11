@@ -79,6 +79,9 @@ class ProScalpApp:
                 self.risk.status(),
             )
         self.risk.on_change = lambda: self.state.save("risk", self.risk.snapshot())
+        # Пишем сразу: иначе до первой закрытой сделки в хранилище пусто,
+        # и перезапуск в этом окне терял бы начало дня.
+        self.risk.on_change()
 
     def _on_stall(self, idle_sec: float) -> None:
         self.tg.send(

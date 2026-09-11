@@ -7,7 +7,8 @@ import time
 import pytest
 import requests
 
-from app.http_client import BudgetExceeded, redact, request_with_retry
+from app.http_client import BudgetExceeded, request_with_retry
+from app.logging_setup import redact
 
 
 class _Session:
@@ -68,3 +69,11 @@ def test_token_is_not_written_to_logs():
     url = "https://api.telegram.org/bot405270881:AAHdZWuGRNKLR0P1LD0ct/sendMessage"
     assert "405270881" not in redact(f"Ошибка на {url}")
     assert "/bot<токен>" in redact(url)
+
+
+def test_proxy_password_is_not_written_to_logs():
+    assert "секрет" not in redact("прокси http://bot:секрет@vps1001.example.ru:3128")
+
+
+def test_api_key_header_is_not_written_to_logs():
+    assert "abc123" not in redact("headers: {'Authorization': 'Bearer abc123'}")
