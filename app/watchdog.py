@@ -39,14 +39,20 @@ class Watchdog:
         timeout_sec: float,
         on_stall: Callable[[float], None] | None = None,
         check_interval_sec: float = 30.0,
+        freeze_tolerance_sec: float = 60.0,
     ) -> None:
         self.timeout_sec = timeout_sec
         self.check_interval_sec = check_interval_sec
+        self.freeze_tolerance_sec = freeze_tolerance_sec
         self.on_stall = on_stall
         self._last_beat = time.time()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def oversleep_sec(self, since: float) -> float:
+        """На сколько сторож проспал дольше, чем просил."""
+        return max(0.0, time.time() - since - self.check_interval_sec)
 
     def beat(self) -> None:
         """Отметить успешное завершение цикла."""
@@ -59,7 +65,21 @@ class Watchdog:
 
     def start(self) -> None:
         def loop() -> None:
+            last_check = time.time()
             while not self._stop.wait(self.check_interval_sec):
+                # Сторож спал дольше, чем просил, — значит не выполнялся весь
+                # процесс: пауза виртуалки или нехватка CPU. Часы при этом
+                # ушли вперёд, и простой цикла тут ни при чём. Убивать не за что.
+                drift = self.oversleep_sec(last_check)
+                last_check = time.time()
+                if drift > self.freeze_tolerance_sec:
+                    log.warning(
+                        "процесс не выполнялся %.0f с (заморозка, не зависание) — "
+                        "счётчик сброшен",
+                        drift,
+                    )
+                    self.beat()
+                    continue
                 idle = self.idle_sec()
                 if idle < self.timeout_sec:
                     continue
