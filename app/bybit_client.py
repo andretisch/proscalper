@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from app.config import Settings
-from app.http_client import make_session
+from app.http_client import SessionPool
 from app.logging_setup import get_logger
 
 log = get_logger("bybit")
@@ -19,8 +19,11 @@ log = get_logger("bybit")
 class BybitClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
-        self.session = make_session(settings)
-        self.session.headers.update({"Content-Type": "application/json"})
+        self._sessions = SessionPool(settings, {"Content-Type": "application/json"})
+
+    @property
+    def session(self):
+        return self._sessions.get()
 
     def _sign(self, payload: str, ts: str, recv: str) -> str:
         raw = f"{ts}{self.s.bybit_key}{recv}{payload}"
