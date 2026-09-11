@@ -130,11 +130,16 @@ class PaperBroker:
         books: dict[str, dict[str, Any]],
         *,
         decide_manage: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        on_progress: Callable[[], None] | None = None,
     ) -> tuple[list[str], list[str]]:
         closed: list[str] = []
         risk_events: list[str] = []
         now = time.time()
         for trade in self.journal.list_trades(status="open"):
+            # Ведение позиции ходит к ИИ по сети: без отметки прогресса
+            # медленный ответ выглядел как зависший процесс.
+            if on_progress is not None:
+                on_progress()
             symbol = trade["symbol"]
             snap = books.get(symbol)
             if not snap:

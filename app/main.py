@@ -355,7 +355,11 @@ class ProScalpApp:
         books = self.collect_books(deadline=deadline)
         opened = []
         closed, risk_events = self.paper.manage_open_trades(
-            books, decide_manage=self.ai.decide_manage
+            books,
+            decide_manage=lambda position: self.ai.decide_manage(
+                position, deadline=deadline
+            ),
+            on_progress=self.watchdog.beat,
         )
         skipped = []
         open_symbols = self.paper.open_symbols()
@@ -468,14 +472,14 @@ class ProScalpApp:
         if notify:
             for ev in risk_events:
                 if ev == "soft_pause":
-                    self.tg.send(
+                    self.tg.send_async(
                         md_escape(
                             "⚠️ Мягкая пауза: достигнут 50% дневного лимита (−1%). "
                             "Пауза 2 часа."
                         )
                     )
                 if ev == "hard_stop":
-                    self.tg.send(
+                    self.tg.send_async(
                         md_escape(
                             "🛑 Жёсткий дневной стоп (−2%). "
                             "Торговля остановлена на 24ч или /resume."
@@ -517,7 +521,7 @@ class ProScalpApp:
                 parts.append(f"🔻 {md_bold('Закрыто')}\n" + md_pre("\n".join(closed)))
             if opened:
                 parts.append(f"🟢 {md_bold('Открыто')}\n" + md_pre("\n".join(opened)))
-            self.tg.send("\n\n".join(parts))
+            self.tg.send_async("\n\n".join(parts))
         return summary
 
     def bootstrap(self) -> None:
@@ -553,21 +557,23 @@ class ProScalpApp:
         try:
             comment = self.refresh_watchlist_ai()
             self.log.info("watchlist: %s", ", ".join(self.watchlist))
-            self.tg.send(
+            self.tg.send_async(
                 f"{md_bold('Watchlist')}: {md_code(', '.join(self.watchlist))}\n"
                 + md_escape(comment[:500])
             )
         except Exception as e:
             self.log.exception("watchlist AI недоступен")
-            self.tg.send(md_escape(f"Watchlist ИИ недоступен: {e}. Использую дефолт."))
+            self.tg.send_async(
+                md_escape(f"Watchlist ИИ недоступен: {e}. Использую дефолт.")
+            )
 
         try:
             summary = self.run_once(notify=True)
             self.watchdog.beat()
-            self.tg.send(f"{md_bold('Первый скан')}\n{md_pre(summary[:3500])}")
+            self.tg.send_async(f"{md_bold('Первый скан')}\n{md_pre(summary[:3500])}")
         except Exception as e:
             self.log.exception("ошибка первого скана")
-            self.tg.send(md_escape(f"Ошибка первого скана: {e}"))
+            self.tg.send_async(md_escape(f"Ошибка первого скана: {e}"))
 
         last_watch = time.time()
         while self.running:
@@ -576,7 +582,7 @@ class ProScalpApp:
                 if time.time() - last_watch > 3600:
                     comment = self.refresh_watchlist_ai()
                     self.log.info("watchlist обновлён: %s", ", ".join(self.watchlist))
-                    self.tg.send(
+                    self.tg.send_async(
                         f"{md_bold('Watchlist обновлён')}: "
                         f"{md_code(', '.join(self.watchlist))}\n"
                         + md_escape(comment[:400])
@@ -586,7 +592,7 @@ class ProScalpApp:
                 self.watchdog.beat()
             except Exception as e:
                 self.log.exception("ошибка цикла")
-                self.tg.send(md_escape(f"Ошибка цикла: {e}"))
+                self.tg.send_async(md_escape(f"Ошибка цикла: {e}"))
 
 
 def main() -> None:

@@ -73,12 +73,15 @@ def make_session(settings: Settings) -> requests.Session:
     # POST может создать сообщение или ордер, и повтор после потерянного
     # ответа задвоит его. Оборванное соединение urllib3 повторяет для любого
     # метода — там запрос до сервера, как правило, не доехал.
+    # Счётчики маленькие намеренно: повторы пула умножают время ожидания,
+    # а логирует их urllib3, не мы. Настоящие повторы — в request_with_retry,
+    # где есть и дедлайн, и понятная запись в лог на каждую попытку.
     retry = Retry(
-        total=2,
-        connect=2,
-        read=1,
-        status=2,
-        backoff_factor=0.6,
+        total=1,
+        connect=1,
+        read=0,
+        status=1,
+        backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset({"GET"}),
         raise_on_status=False,

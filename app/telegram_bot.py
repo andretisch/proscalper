@@ -19,6 +19,12 @@ _MD_SPECIAL = set(r"_*[]()~`>#+-=|{}.!\\")
 
 _UNSET = object()
 
+# Долго ждать Telegram незачем: сообщение либо уходит, либо повторяется.
+_CONNECT_TIMEOUT = 6.0
+_SEND_TIMEOUT = (_CONNECT_TIMEOUT, 20.0)
+# Long-poll сам держит соединение 25 с, чтение должно это переживать.
+_POLL_TIMEOUT = (_CONNECT_TIMEOUT, 35.0)
+
 
 def md_escape(text: object) -> str:
     """Экранировать текст для MarkdownV2."""
@@ -51,6 +57,8 @@ class TelegramBot:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._inbox: queue.Queue[dict] = queue.Queue(maxsize=100)
+        self._outbox: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=200)
+        self._sender: threading.Thread | None = None
         self.command_handlers: dict[str, Callable[[str], str]] = {}
 
     @property
@@ -91,7 +99,7 @@ class TelegramBot:
                 if mode:
                     payload["parse_mode"] = mode
                 r = self.session.post(
-                    f"{self.base}/sendMessage", json=payload, timeout=30
+                    f"{self.base}/sendMessage", json=payload, timeout=_SEND_TIMEOUT
                 )
                 data = r.json()
                 if data.get("ok"):
@@ -110,11 +118,26 @@ class TelegramBot:
                 time.sleep(2 * (attempt + 1))
         return False
 
+    def send_async(self, text: str, chat_id: str | None = None) -> None:
+        """Поставить уведомление в очередь и сразу вернуться.
+
+        Отправка через прокси иногда занимает минуты. Раньше уведомление о
+        сделке отправлялось прямо из торгового цикла, цикл всё это время не
+        двигался — и сторож справедливо считал процесс зависшим.
+        """
+        if self._sender is None or not self._sender.is_alive():
+            self.send(text, chat_id=chat_id)
+            return
+        try:
+            self._outbox.put_nowait((text, chat_id))
+        except queue.Full:
+            log.warning("очередь уведомлений переполнена, сообщение отброшено")
+
     def get_updates(self) -> list[dict]:
         r = self.session.get(
             f"{self.base}/getUpdates",
             params={"offset": self._offset, "timeout": 25},
-            timeout=35,
+            timeout=_POLL_TIMEOUT,
         )
         data = r.json()
         if not data.get("ok"):
@@ -206,10 +229,23 @@ class TelegramBot:
                 except Exception:
                     log.exception("ошибка обработки сообщения")
 
-        for target, name in ((poll, "tg-poll"), (work, "tg-work")):
+        def deliver() -> None:
+            while not self._stop.is_set():
+                try:
+                    text, chat_id = self._outbox.get(timeout=1)
+                except queue.Empty:
+                    continue
+                try:
+                    self.send(text, chat_id=chat_id)
+                except Exception:
+                    log.exception("ошибка отправки уведомления")
+
+        for target, name in ((poll, "tg-poll"), (work, "tg-work"), (deliver, "tg-send")):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
             self._threads.append(thread)
+            if name == "tg-send":
+                self._sender = thread
 
     def stop(self) -> None:
         self._stop.set()
