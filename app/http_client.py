@@ -1,15 +1,36 @@
-"""Shared HTTP session with optional proxy support."""
+"""Общий HTTP-слой: прокси, таймауты, ретраи.
+
+Прокси рвёт и подвешивает соединения — это норма, а не исключение. Поэтому
+каждый запрос ограничен по времени, повторяется при обрыве и никогда не
+может утащить торговый цикл за лимит сторожа.
+"""
 
 from __future__ import annotations
 
 import os
+import re
+import socket
 import threading
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from app.logging_setup import get_logger
 
 if TYPE_CHECKING:
     from app.config import Settings
+
+log = get_logger("http")
+
+# Токен Telegram лежит прямо в URL, а текст ошибки печатает URL целиком.
+_SECRET_IN_URL = re.compile(r"/bot\d+:[\w-]+")
+
+
+def redact(text: object) -> str:
+    return _SECRET_IN_URL.sub("/bot<токен>", str(text))
 
 
 def requests_proxies(settings: Settings) -> dict[str, str] | None:
@@ -39,12 +60,38 @@ def apply_proxy_env(settings: Settings) -> None:
         os.environ.setdefault("NO_PROXY", settings.no_proxy)
 
 
+def install_socket_backstop(timeout_sec: float) -> None:
+    """Страховка на случай, когда таймаут requests не срабатывает.
+
+    Таймаут requests ограничивает паузу между байтами уже установленного
+    соединения. CONNECT к прокси и TLS-рукопожатие проходят мимо него, и
+    поток может висеть часами — именно так выглядели зависания в логе.
+    """
+    if timeout_sec > 0:
+        socket.setdefaulttimeout(timeout_sec)
+
+
 def make_session(settings: Settings) -> requests.Session:
     session = requests.Session()
     session.trust_env = True
     proxies = requests_proxies(settings)
     if proxies:
         session.proxies.update(proxies)
+    # Повторы на уровне пула включены только для GET: POST может создать
+    # ордер или сообщение, и повтор после потерянного ответа задвоит его.
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=1,
+        status=2,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     return session
 
 
@@ -71,3 +118,55 @@ class SessionPool:
                 session.headers.update(self._headers)
             self._local.session = session
         return session
+
+
+class BudgetExceeded(TimeoutError):
+    """Время, отведённое на операцию, кончилось — запрос даже не начинали."""
+
+
+def request_with_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    timeout: tuple[float, float] | float,
+    attempts: int = 3,
+    deadline: float | None = None,
+    label: str = "",
+    **kwargs: Any,
+) -> requests.Response:
+    """Пережить моргание прокси, но не зависнуть.
+
+    `deadline` — граница по стенным часам. Пропустить символ дешевле, чем
+    утащить весь цикл за лимит сторожа и получить перезапуск процесса.
+    """
+    name = label or url
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if deadline is not None and time.time() >= deadline:
+            raise BudgetExceeded(f"{name}: бюджет времени исчерпан")
+        started = time.time()
+        try:
+            response = session.request(method, url, timeout=timeout, **kwargs)
+        except requests.RequestException as e:
+            last = e
+            log.warning(
+                "сеть %s (попытка %s/%s, %.1fс): %s",
+                name,
+                attempt,
+                attempts,
+                time.time() - started,
+                redact(e)[:200],
+            )
+            if attempt == attempts:
+                break
+            pause = min(1.5 * attempt, 4.0)
+            if deadline is not None and time.time() + pause >= deadline:
+                break
+            time.sleep(pause)
+            continue
+        elapsed = time.time() - started
+        if elapsed > 10:
+            log.warning("медленный ответ %s: %.1fс", name, elapsed)
+        return response
+    raise last if last is not None else RuntimeError(f"{name}: запрос не выполнен")

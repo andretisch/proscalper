@@ -280,13 +280,23 @@ class ProScalpApp:
         self.watchlist = [s for s in symbols if not (s in seen or seen.add(s))]
         return decision.get("comment") or "watchlist обновлён по размаху"
 
-    def collect_books(self) -> dict[str, dict]:
+    def collect_books(self, deadline: float | None = None) -> dict[str, dict]:
         books: dict[str, dict] = {}
         for symbol in self.watchlist:
+            if deadline is not None and time.time() >= deadline:
+                self.log.warning(
+                    "бюджет цикла исчерпан, стаканы собраны не полностью (%s из %s)",
+                    len(books),
+                    len(self.watchlist),
+                )
+                break
             for category, mtype in (("linear", "perp"), ("spot", "spot")):
                 try:
                     raw = self.bybit.orderbook(
-                        symbol, category=category, limit=self.settings.book_depth_limit
+                        symbol,
+                        category=category,
+                        limit=self.settings.book_depth_limit,
+                        deadline=deadline,
                     )
                     snap = OrderBookStore.parse_book(
                         raw,
@@ -310,13 +320,18 @@ class ProScalpApp:
                         }
                 except Exception:
                     continue
+                finally:
+                    # Медленный цикл — не зависший: пока есть прогресс,
+                    # сторож не должен считать процесс мёртвым.
+                    self.watchdog.beat()
                 time.sleep(0.05)
         return books
 
     def run_once(self, notify: bool = True) -> str:
         self.cycle += 1
+        deadline = time.time() + self.settings.cycle_budget_sec
         can, why = self.risk.can_open()
-        books = self.collect_books()
+        books = self.collect_books(deadline=deadline)
         opened = []
         closed, risk_events = self.paper.manage_open_trades(
             books, decide_manage=self.ai.decide_manage
@@ -326,7 +341,17 @@ class ProScalpApp:
 
         fee_rt = 0.11  # fallback %; refine per symbol if available
         for symbol, snap in books.items():
-            tickers = self.bybit.tickers(category="linear", symbol=symbol)
+            self.watchdog.beat()
+            if time.time() >= deadline:
+                skipped.append(f"{symbol}: бюджет цикла исчерпан")
+                continue
+            try:
+                tickers = self.bybit.tickers(
+                    category="linear", symbol=symbol, deadline=deadline
+                )
+            except Exception as e:
+                skipped.append(f"{symbol}: тикер недоступен ({e})")
+                continue
             ticker = tickers[0] if tickers else None
             taker_rate = self.settings.taker_fee_rate_override
             if not self.settings.market_data_mainnet:
@@ -338,7 +363,7 @@ class ProScalpApp:
                     pass
             fee_rt = taker_rate * 100 * 2
 
-            momentum = self.market.momentum(symbol)
+            momentum = self.market.momentum(symbol, deadline=deadline)
             room = momentum.range_pct if momentum else None
             if room is None:
                 room = self.store.recent_range_pct(
@@ -376,6 +401,7 @@ class ProScalpApp:
                 try:
                     decision = self.ai.decide_trade(
                         sig.to_dict(),
+                        deadline=deadline,
                         context=(
                             f"fee_rt%={fee_rt:.4f}; mid={snap.get('mid')}; "
                             f"ЛП={snap.get('wall_side')}@{snap.get('wall_price')} "
@@ -442,14 +468,22 @@ class ProScalpApp:
             f"opened: {opened or ['—']}\n"
             f"notes: {skipped[:5] or ['—']}"
         )
+        spent = self.settings.cycle_budget_sec - (deadline - time.time())
         self.log.info(
-            "цикл #%s books=%s открыто=%s закрыто=%s пропущено=%s",
+            "цикл #%s books=%s открыто=%s закрыто=%s пропущено=%s за %.0fс",
             self.cycle,
             len(books),
             len(opened),
             len(closed),
             len(skipped),
+            spent,
         )
+        if time.time() >= deadline:
+            self.log.warning(
+                "цикл #%s не уложился в бюджет %.0fс — сеть деградирует",
+                self.cycle,
+                self.settings.cycle_budget_sec,
+            )
         for line in opened:
             self.log.info("ОТКРЫТО %s", line)
         for line in closed:

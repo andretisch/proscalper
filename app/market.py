@@ -91,14 +91,18 @@ class MarketMeter:
         self.ttl_sec = ttl_sec
         self._cache: dict[str, tuple[float, Momentum | None]] = {}
 
-    def momentum(self, symbol: str) -> Momentum | None:
+    def momentum(self, symbol: str, deadline: float | None = None) -> Momentum | None:
         now = time.time()
         hit = self._cache.get(symbol)
         if hit and now - hit[0] < self.ttl_sec:
             return hit[1]
         try:
             rows = self.client.klines(
-                symbol, category="linear", interval="1", limit=self.minutes
+                symbol,
+                category="linear",
+                interval="1",
+                limit=self.minutes,
+                deadline=deadline,
             )
             value = momentum_from_klines(rows)
         except Exception:
