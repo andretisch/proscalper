@@ -26,6 +26,24 @@ def test_idle_grows_without_beat():
     assert w.idle_sec() >= 119
 
 
+def test_normal_wakeup_is_not_treated_as_freeze():
+    w = Watchdog(timeout_sec=600, check_interval_sec=30, freeze_tolerance_sec=60)
+    # Проснулись почти вовремя — обычная работа.
+    assert w.oversleep_sec(time.time() - 31) < w.freeze_tolerance_sec
+
+
+def test_frozen_process_is_detected_by_oversleep():
+    """Пауза виртуалки выглядит как простой цикла, но это не зависание.
+
+    Сторож просил 30 с, а прошло 700: не выполнялся весь процесс, включая
+    сам сторож. Часы ушли вперёд, убивать здоровый процесс не за что.
+    """
+    w = Watchdog(timeout_sec=600, check_interval_sec=30, freeze_tolerance_sec=60)
+    drift = w.oversleep_sec(time.time() - 700)
+    assert drift > w.freeze_tolerance_sec
+    assert round(drift) == 670
+
+
 def test_stall_callback_receives_idle_time():
     """Проверяем колбэк напрямую: запуск потока завершил бы процесс."""
     seen: list[float] = []
