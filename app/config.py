@@ -76,6 +76,15 @@ class Settings:
     max_fee_share_of_risk: float
     watchdog_timeout_sec: float
     log_level: str
+    http_connect_timeout_sec: float
+    http_read_timeout_sec: float
+    http_retry_attempts: int
+    socket_timeout_sec: float
+    cycle_budget_sec: float
+
+    @property
+    def http_timeout(self) -> tuple[float, float]:
+        return (self.http_connect_timeout_sec, self.http_read_timeout_sec)
 
     @property
     def proxy_enabled(self) -> bool:
@@ -152,8 +161,14 @@ def load_settings() -> Settings:
         max_fee_share_of_risk=_float(os.getenv("MAX_FEE_SHARE_OF_RISK"), 0.20),
         watchdog_timeout_sec=_float(os.getenv("WATCHDOG_TIMEOUT_SEC"), 600.0),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+        http_connect_timeout_sec=_float(os.getenv("HTTP_CONNECT_TIMEOUT_SEC"), 6.0),
+        http_read_timeout_sec=_float(os.getenv("HTTP_READ_TIMEOUT_SEC"), 15.0),
+        http_retry_attempts=int(_float(os.getenv("HTTP_RETRY_ATTEMPTS"), 3)),
+        socket_timeout_sec=_float(os.getenv("SOCKET_TIMEOUT_SEC"), 90.0),
+        cycle_budget_sec=_float(os.getenv("CYCLE_BUDGET_SEC"), 240.0),
     )
-    from app.http_client import apply_proxy_env
+    from app.http_client import apply_proxy_env, install_socket_backstop
 
     apply_proxy_env(settings)
+    install_socket_backstop(settings.socket_timeout_sec)
     return settings

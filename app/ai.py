@@ -6,7 +6,10 @@ import json
 from typing import Any
 
 from app.config import Settings
-from app.http_client import SessionPool
+from app.http_client import SessionPool, request_with_retry
+from app.logging_setup import get_logger
+
+log = get_logger("ai")
 
 
 class OllamaClient:
@@ -18,27 +21,42 @@ class OllamaClient:
     def session(self):
         return self._sessions.get()
 
-    def chat(self, messages: list[dict[str, str]], timeout: int = 60) -> str:
-        url = f"{self.s.ollama_host}/api/chat"
-        payload = {
-            "model": self.s.ollama_model,
-            "messages": messages,
-            "stream": False,
-        }
-        r = self.session.post(
-            url,
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        timeout: int = 60,
+        deadline: float | None = None,
+    ) -> str:
+        # Ответ модели приходит одним куском, поэтому read-таймаут здесь
+        # свой и заметно больше, чем у биржевых запросов.
+        r = request_with_retry(
+            self.session,
+            "POST",
+            f"{self.s.ollama_host}/api/chat",
+            timeout=(self.s.http_connect_timeout_sec, float(timeout)),
+            attempts=2,
+            deadline=deadline,
+            label="ollama/api/chat",
             headers={
                 "Authorization": f"Bearer {self.s.ollama_key}",
                 "Content-Type": "application/json",
             },
-            json=payload,
-            timeout=timeout,
+            json={
+                "model": self.s.ollama_model,
+                "messages": messages,
+                "stream": False,
+            },
         )
         r.raise_for_status()
         data = r.json()
         return (data.get("message") or {}).get("content") or ""
 
-    def decide_trade(self, signal: dict[str, Any], context: str) -> dict[str, Any]:
+    def decide_trade(
+        self,
+        signal: dict[str, Any],
+        context: str,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
         system = (
             "Ты риск-офицер скальп-бота ProScalp (playbook S1–S5). "
             "Ответь СТРОГО JSON без markdown:\n"
@@ -63,7 +81,9 @@ class OllamaClient:
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ]
+            ],
+            timeout=45,
+            deadline=deadline,
         )
         return _parse_json_decision(raw)
 
