@@ -37,8 +37,9 @@ class Signal:
     wall_ratio: float | None = None
     expected_move_pct: float = 0.2
     risk_pct: float = 0.0
-    rr: float = 0.0
+    rr: float = 0.0  # чистый RR, комиссия уже учтена
     room_pct: float = 0.0
+    fee_share_of_risk: float = 0.0
     wall: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +72,25 @@ def _regime(change24: float) -> str:
     return "range"
 
 
+def _impulse_risk_pct(
+    *,
+    capture: float,
+    fee_roundtrip_pct: float,
+    min_rr: float,
+    technical_pct: float,
+    floor_pct: float,
+) -> float:
+    """Стоп импульсного сетапа — не дальше, чем позволяет требуемый чистый RR.
+
+    Раньше риск брался как доля размаха, а цель упиралась в потолок: чем
+    волатильнее символ, тем хуже становилось соотношение. Возвращает 0, если
+    даже минимально осмысленный стоп не укладывается в требуемый RR.
+    """
+    affordable = (capture - fee_roundtrip_pct) / min_rr - fee_roundtrip_pct
+    risk = min(technical_pct, affordable)
+    return risk if risk >= floor_pct else 0.0
+
+
 def _trigger(momentum: Momentum | None, change24: float) -> bool:
     """Триггер импульсного сетапа.
 
@@ -86,17 +106,32 @@ def _trigger(momentum: Momentum | None, change24: float) -> bool:
 
 
 def _viable(
-    *, expected: float, risk_pct: float, fee_roundtrip_pct: float, min_rr: float
-) -> tuple[bool, float]:
-    """Сетап проходит, только если цель окупает комиссию и стоп."""
+    *,
+    expected: float,
+    risk_pct: float,
+    fee_roundtrip_pct: float,
+    min_rr: float,
+    max_fee_share: float = 0.20,
+) -> tuple[bool, float, float]:
+    """Сетап проходит, только если цель окупает комиссию и стоп.
+
+    RR считается по ЧИСТЫМ величинам: комиссия уменьшает прибыль и
+    одновременно увеличивает убыток, поэтому номинальный RR всегда льстит.
+    За ночь средний риск был 0.362% при round-trip 0.11% и номинальном RR 2.0 —
+    чистый RR такой сделки всего 1.29, и именно на этом разрыве стратегия
+    теряла деньги при формально проходящем фильтре.
+    """
     if risk_pct <= 0:
-        return False, 0.0
-    rr = expected / risk_pct
-    if expected < fee_roundtrip_pct * 3:
-        return False, rr
-    if rr < min_rr:
-        return False, rr
-    return True, rr
+        return False, 0.0, 1.0
+    fee_share = fee_roundtrip_pct / risk_pct
+    net_gain = expected - fee_roundtrip_pct
+    net_loss = risk_pct + fee_roundtrip_pct
+    if net_gain <= 0 or net_loss <= 0:
+        return False, 0.0, fee_share
+    net_rr = net_gain / net_loss
+    if net_rr < min_rr:
+        return False, net_rr, fee_share
+    return True, net_rr, fee_share
 
 
 def detect_signals(
@@ -113,6 +148,7 @@ def detect_signals(
     min_wall_held_share: float = 0.6,
     wall_approach_pct: float = 0.12,
     min_rr: float = 1.5,
+    max_fee_share: float = 0.20,
 ) -> list[Signal]:
     out: list[Signal] = []
     mid = snap.get("mid")
@@ -162,11 +198,12 @@ def detect_signals(
                 else wall_price * (1 + buffer_pct / 100)
             )
             risk_pct = _pct(mid, stop)
-            ok, rr = _viable(
+            ok, rr, fee_share = _viable(
                 expected=capture,
                 risk_pct=risk_pct,
                 fee_roundtrip_pct=fee_roundtrip_pct,
                 min_rr=min_rr,
+                max_fee_share=max_fee_share,
             )
             if ok:
                 out.append(
@@ -188,6 +225,7 @@ def detect_signals(
                         risk_pct=risk_pct,
                         rr=rr,
                         room_pct=room_pct,
+                        fee_share_of_risk=fee_share,
                         wall=wall_track.to_dict(),
                     )
                 )
@@ -195,15 +233,22 @@ def detect_signals(
     # S4 — продолжение по активному инструменту.
     if regime == "trend_in_play" and abs(change24) >= 8 and _trigger(momentum, change24):
         side = "long" if change24 > 0 else "short"
-        risk_pct = max(_clamp(room_pct * 0.25, 0.1, 0.8), spread_pct * 3)
+        risk_pct = _impulse_risk_pct(
+            capture=capture,
+            fee_roundtrip_pct=fee_roundtrip_pct,
+            min_rr=min_rr,
+            technical_pct=_clamp(room_pct * 0.25, 0.1, 0.8),
+            floor_pct=max(spread_pct * 3, 0.05),
+        )
         stop = (
             mid * (1 - risk_pct / 100) if side == "long" else mid * (1 + risk_pct / 100)
         )
-        ok, rr = _viable(
+        ok, rr, fee_share = _viable(
             expected=capture,
             risk_pct=risk_pct,
             fee_roundtrip_pct=fee_roundtrip_pct,
             min_rr=min_rr,
+            max_fee_share=max_fee_share,
         )
         if ok:
             out.append(
@@ -223,6 +268,7 @@ def detect_signals(
                     risk_pct=risk_pct,
                     rr=rr,
                     room_pct=room_pct,
+                    fee_share_of_risk=fee_share,
                 )
             )
 
@@ -233,13 +279,20 @@ def detect_signals(
         and momentum.change_pct < 0
         and momentum.position >= DRAIN_MIN_POSITION
     ):
-        risk_pct = max(_clamp(room_pct * 0.25, 0.15, 0.8), spread_pct * 3)
+        risk_pct = _impulse_risk_pct(
+            capture=capture,
+            fee_roundtrip_pct=fee_roundtrip_pct,
+            min_rr=min_rr,
+            technical_pct=_clamp(room_pct * 0.25, 0.15, 0.8),
+            floor_pct=max(spread_pct * 3, 0.05),
+        )
         stop = mid * (1 + risk_pct / 100)
-        ok, rr = _viable(
+        ok, rr, fee_share = _viable(
             expected=capture,
             risk_pct=risk_pct,
             fee_roundtrip_pct=fee_roundtrip_pct,
             min_rr=min_rr,
+            max_fee_share=max_fee_share,
         )
         if ok:
             out.append(
@@ -259,6 +312,7 @@ def detect_signals(
                     risk_pct=risk_pct,
                     rr=rr,
                     room_pct=room_pct,
+                    fee_share_of_risk=fee_share,
                 )
             )
 

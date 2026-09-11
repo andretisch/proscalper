@@ -11,6 +11,9 @@ from urllib.parse import urlencode
 
 from app.config import Settings
 from app.http_client import make_session
+from app.logging_setup import get_logger
+
+log = get_logger("bybit")
 
 
 class BybitClient:
@@ -36,9 +39,19 @@ class BybitClient:
         }
 
     def get_public(self, path: str, params: dict[str, Any] | None = None) -> dict:
-        r = self.session.get(
-            f"{self.s.bybit_public_base}{path}", params=params or {}, timeout=20
-        )
+        started = time.time()
+        try:
+            r = self.session.get(
+                f"{self.s.bybit_public_base}{path}", params=params or {}, timeout=20
+            )
+        except Exception as e:
+            log.warning(
+                "обрыв запроса %s после %.1fс: %s", path, time.time() - started, e
+            )
+            raise
+        elapsed = time.time() - started
+        if elapsed > 10:
+            log.warning("медленный ответ %s: %.1fс", path, elapsed)
         r.raise_for_status()
         data = r.json()
         if data.get("retCode") != 0:

@@ -9,6 +9,7 @@ from app.signals import detect_signals
 from app.wall_tracker import WallTrack
 
 FEE_RT = 0.11
+MIN_RR_DEFAULT = 1.5
 TICKER = {"price24hPcnt": "0.01"}  # +1% — боковик
 
 
@@ -160,3 +161,40 @@ def test_s5_requires_drain_to_continue():
     assert "S5_drain_short" not in _setups(
         ticker=drain, momentum=_mom(1.5, 0.5), room_pct=3.0
     )
+
+
+def test_rr_is_net_of_fees():
+    sig = _signals()[0]
+    net = (sig.expected_move_pct - FEE_RT) / (sig.risk_pct + FEE_RT)
+    assert sig.rr == pytest.approx(net)
+    # номинальный RR всегда льстит — чистый обязан быть строго меньше
+    assert sig.rr < sig.expected_move_pct / sig.risk_pct
+
+
+def test_target_below_fee_is_rejected():
+    # размах 0.2% → цель 0.1% ниже round-trip 0.11%: прибыли нет по построению
+    assert _signals(room_pct=0.2) == []
+
+
+def test_fee_share_is_reported_on_signal():
+    sig = _signals()[0]
+    assert sig.fee_share_of_risk == pytest.approx(FEE_RT / sig.risk_pct)
+
+
+def test_thin_target_with_wide_stop_rejected():
+    # цель чуть выше комиссии, но риск велик — чистый RR ниже порога
+    assert _signals(room_pct=0.5) == []
+
+
+def test_impulse_stop_does_not_widen_with_volatility():
+    """Раньше риск рос вместе с размахом, а цель упиралась в потолок 1.2%,
+    из-за чего на самых волатильных символах RR был худшим."""
+    up = {"price24hPcnt": "0.09"}
+    calm = [s for s in _signals(ticker=up, momentum=_mom(0.8, 0.5), room_pct=3.0)
+            if s.setup_id == "S4_active_continuation"]
+    wild = [s for s in _signals(ticker=up, momentum=_mom(0.8, 0.5), room_pct=8.0)
+            if s.setup_id == "S4_active_continuation"]
+    assert calm and wild
+    assert wild[0].risk_pct <= calm[0].risk_pct + 1e-9
+    assert wild[0].rr >= MIN_RR_DEFAULT
+    assert calm[0].rr >= MIN_RR_DEFAULT

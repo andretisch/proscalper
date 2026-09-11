@@ -8,6 +8,9 @@ from typing import Callable
 
 from app.config import Settings
 from app.http_client import make_session
+from app.logging_setup import get_logger
+
+log = get_logger("telegram")
 
 
 class TelegramBot:
@@ -45,7 +48,8 @@ class TelegramBot:
                     timeout=30,
                 )
                 return bool(r.json().get("ok"))
-            except Exception:
+            except Exception as e:
+                log.warning("обрыв отправки (попытка %s/3): %s", attempt + 1, e)
                 if attempt == 2:
                     return False
                 time.sleep(2 * (attempt + 1))
@@ -100,7 +104,8 @@ class TelegramBot:
                 try:
                     for u in self.get_updates():
                         self.handle_update(u)
-                except Exception:
+                except Exception as e:
+                    log.warning("обрыв polling: %s", e)
                     time.sleep(3)
 
         self._thread = threading.Thread(target=loop, name="tg-poll", daemon=True)

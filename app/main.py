@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
 from app.ai import OllamaClient
 from app.bybit_client import BybitClient
 from app.config import load_settings
+from app.logging_setup import get_logger, setup_logging
 from app.market import MarketMeter, rank_candidates
 from app.orderbook_store import OrderBookStore
 from app.paper import PaperBroker
@@ -17,6 +19,7 @@ from app.risk import RiskState
 from app.signals import detect_signals
 from app.telegram_bot import TelegramBot
 from app.wall_tracker import WallTracker
+from app.watchdog import Watchdog
 
 DEFAULT_WATCH = ["SOLUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
 
@@ -24,6 +27,11 @@ DEFAULT_WATCH = ["SOLUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
 class ProScalpApp:
     def __init__(self) -> None:
         self.settings = load_settings()
+        setup_logging(
+            self.settings.root,
+            level=getattr(logging, self.settings.log_level, logging.INFO),
+        )
+        self.log = get_logger("app")
         self.bybit = BybitClient(self.settings)
         self.store = OrderBookStore(
             self.settings.root / "data" / "orderbook" / "history.sqlite3"
@@ -48,7 +56,17 @@ class ProScalpApp:
         self.watchlist = list(DEFAULT_WATCH)
         self.running = True
         self.cycle = 0
+        self.watchdog = Watchdog(
+            timeout_sec=self.settings.watchdog_timeout_sec,
+            on_stall=self._on_stall,
+        )
         self._register_commands()
+
+    def _on_stall(self, idle_sec: float) -> None:
+        self.tg.send(
+            f"🛑 Бот завис: цикл не отвечает {idle_sec / 60:.0f} мин. "
+            f"Процесс перезапускается."
+        )
 
     def _register_commands(self) -> None:
         self.tg.command_handlers = {
@@ -331,6 +349,7 @@ class ProScalpApp:
                 min_wall_held_share=self.settings.wall_min_held_share,
                 wall_approach_pct=self.settings.wall_approach_pct,
                 min_rr=self.settings.min_rr,
+                max_fee_share=self.settings.max_fee_share_of_risk,
             )
             for sig in signals[:1]:
                 if symbol in open_symbols:
@@ -354,7 +373,8 @@ class ProScalpApp:
                             f"ЛП={snap.get('wall_side')}@{snap.get('wall_price')} "
                             f"доля_глубины={(snap.get('wall_share') or 0) * 100:.0f}%; "
                             f"размах_15м={room:.3f}%; "
-                            f"стакан_виден_на={snap.get('book_range_pct', 0):.3f}%"
+                            f"стакан_виден_на={snap.get('book_range_pct', 0):.3f}%; "
+                            f"комиссия_съест={sig.fee_share_of_risk * 100:.0f}%_риска"
                         ),
                     )
                 except Exception as e:
@@ -408,6 +428,20 @@ class ProScalpApp:
             f"opened: {opened or ['—']}\n"
             f"notes: {skipped[:5] or ['—']}"
         )
+        self.log.info(
+            "цикл #%s books=%s открыто=%s закрыто=%s пропущено=%s",
+            self.cycle,
+            len(books),
+            len(opened),
+            len(closed),
+            len(skipped),
+        )
+        for line in opened:
+            self.log.info("ОТКРЫТО %s", line)
+        for line in closed:
+            self.log.info("ЗАКРЫТО %s", line)
+        for line in skipped:
+            self.log.debug("пропуск %s", line)
         if notify and (opened or closed):
             parts = []
             if closed:
@@ -433,19 +467,31 @@ class ProScalpApp:
         self.tg.send(msg)
 
     def run_forever(self, interval_sec: int = 60) -> None:
+        self.log.info(
+            "старт: mode=%s окно_импульса=%sс комиссия<=%.0f%%_риска watchdog=%.0fс",
+            self.settings.mode,
+            self.settings.max_seconds_without_impulse,
+            self.settings.max_fee_share_of_risk * 100,
+            self.settings.watchdog_timeout_sec,
+        )
         self.bootstrap()
-        # initial watchlist AI (best-effort)
+        self.watchdog.beat()
+        self.watchdog.start()
+
         try:
             comment = self.refresh_watchlist_ai()
+            self.log.info("watchlist: %s", ", ".join(self.watchlist))
             self.tg.send(f"Watchlist AI: {', '.join(self.watchlist)}\n{comment[:500]}")
         except Exception as e:
+            self.log.exception("watchlist AI недоступен")
             self.tg.send(f"Watchlist AI временно недоступен: {e}. Использую дефолт.")
 
-        # first scan immediately
         try:
             summary = self.run_once(notify=True)
+            self.watchdog.beat()
             self.tg.send("Первый скан:\n" + summary[:3500])
         except Exception as e:
+            self.log.exception("ошибка первого скана")
             self.tg.send(f"Ошибка первого скана: {e}")
 
         last_watch = time.time()
@@ -454,11 +500,13 @@ class ProScalpApp:
             try:
                 if time.time() - last_watch > 3600:
                     comment = self.refresh_watchlist_ai()
+                    self.log.info("watchlist обновлён: %s", ", ".join(self.watchlist))
                     self.tg.send(f"Watchlist обновлён: {', '.join(self.watchlist)}\n{comment[:400]}")
                     last_watch = time.time()
                 self.run_once(notify=True)
+                self.watchdog.beat()
             except Exception as e:
-                print(f"[cycle error] {type(e).__name__}: {e}", flush=True)
+                self.log.exception("ошибка цикла")
                 self.tg.send(f"Ошибка цикла: {e}")
 
 

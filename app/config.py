@@ -73,6 +73,9 @@ class Settings:
     room_window_sec: float
     min_turnover_usd: float
     min_range24_pct: float
+    max_fee_share_of_risk: float
+    watchdog_timeout_sec: float
+    log_level: str
 
     @property
     def proxy_enabled(self) -> bool:
@@ -125,7 +128,7 @@ def load_settings() -> Settings:
         no_proxy=os.getenv("NO_PROXY", "").strip(),
         paper_fee_buffer_mult=_float(os.getenv("PAPER_FEE_BUFFER_MULT"), 3.0),
         max_seconds_without_impulse=int(
-            _float(os.getenv("MAX_SECONDS_WITHOUT_IMPULSE"), 90)
+            _float(os.getenv("MAX_SECONDS_WITHOUT_IMPULSE"), 300)
         ),
         max_parallel_symbols=int(_float(os.getenv("MAX_PARALLEL_SYMBOLS"), 2)),
         max_consecutive_losses=int(_float(os.getenv("MAX_CONSECUTIVE_LOSSES"), 3)),
@@ -146,6 +149,9 @@ def load_settings() -> Settings:
         room_window_sec=_float(os.getenv("ROOM_WINDOW_SEC"), 900.0),
         min_turnover_usd=_float(os.getenv("MIN_TURNOVER_USD"), 20_000_000.0),
         min_range24_pct=_float(os.getenv("MIN_RANGE24_PCT"), 3.0),
+        max_fee_share_of_risk=_float(os.getenv("MAX_FEE_SHARE_OF_RISK"), 0.20),
+        watchdog_timeout_sec=_float(os.getenv("WATCHDOG_TIMEOUT_SEC"), 600.0),
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
     )
     from app.http_client import apply_proxy_env
 
