@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.main import ProScalpApp  # noqa: E402
+from app.telegram_bot import md_bold, md_code, md_escape  # noqa: E402
 
 
 def main() -> None:
@@ -33,13 +34,16 @@ def main() -> None:
     summary = app.run_once(notify=False)
     print(summary)
     ok = app.tg.send(
-        "✅ ProScalp smoke-test пройден.\n"
-        f"Режим: {app.settings.mode} (Bybit testnet={app.settings.bybit_testnet})\n"
-        f"Watchlist: {', '.join(app.watchlist)}\n"
-        f"Снимков стакана: {app.store.count()}\n"
-        f"Журнал: {app.paper.journal.stats()}\n"
-        "Бот готов. Запуск цикла: python3 -m app\n"
-        "Команды: /status /scan /watchlist /help"
+        "\n".join([
+            f"✅ {md_bold('ProScalp smoke-test пройден')}",
+            f"Режим: {md_code(app.settings.mode)}"
+            f" · testnet {md_code(app.settings.bybit_testnet)}",
+            f"Watchlist: {md_code(', '.join(app.watchlist))}",
+            f"Снимков стакана: {md_code(app.store.count())}",
+            f"Журнал: {md_code(app.paper.journal.stats())}",
+            md_escape("Бот готов. Запуск цикла: python3 -m app"),
+            md_escape("Команды: /status /scan /watchlist /help"),
+        ])
     )
     print("telegram_sent", ok)
     print("SMOKE_OK")

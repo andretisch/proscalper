@@ -17,7 +17,7 @@ from app.paper import PaperBroker
 from app.paper_exec import entry_fill_price
 from app.risk import RiskState
 from app.signals import detect_signals
-from app.telegram_bot import TelegramBot
+from app.telegram_bot import TelegramBot, md_bold, md_code, md_escape, md_pre
 from app.wall_tracker import WallTracker
 from app.watchdog import Watchdog
 
@@ -64,31 +64,36 @@ class ProScalpApp:
 
     def _on_stall(self, idle_sec: float) -> None:
         self.tg.send(
-            f"🛑 Бот завис: цикл не отвечает {idle_sec / 60:.0f} мин. "
-            f"Процесс перезапускается."
+            md_escape(
+                f"🛑 Бот завис: цикл не отвечает {idle_sec / 60:.0f} мин. "
+                f"Процесс перезапускается."
+            )
         )
 
     def _register_commands(self) -> None:
         self.tg.command_handlers = {
-            "/help": lambda _: (
-                "ProScalp команды:\n"
-                "/status — состояние и баланс\n"
-                "/balance — текущий баланс\n"
-                "/mode — paper/live переключение\n"
-                "/pause — пауза сигналов\n"
-                "/resume — снять hard/soft стоп\n"
-                "/watchlist — текущий список\n"
-                "/scan — один цикл скана сейчас\n"
-                "Или просто пиши вопрос — ИИ ответит"
-            ),
+            "/help": lambda _: "\n".join([
+                md_bold("ProScalp — команды"),
+                f"{md_code('/status')} — состояние и баланс",
+                f"{md_code('/balance')} — текущий баланс",
+                f"{md_code('/mode')} — переключить paper/live",
+                f"{md_code('/pause')} — пауза сигналов",
+                f"{md_code('/resume')} — снять стоп",
+                f"{md_code('/watchlist')} — текущий список",
+                f"{md_code('/scan')} — один цикл скана",
+                "",
+                md_escape("Или просто напиши вопрос — ИИ ответит."),
+            ]),
             "/status": lambda _: self.status_text(),
             "/balance": lambda _: self.balance_text(),
             "/mode": self._cmd_mode,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
-            "/watchlist": lambda _: "Watchlist: " + ", ".join(self.watchlist),
-            "/scan": lambda _: self.run_once(notify=False) or "Скан выполнен. /status",
-            "/start": lambda _: "ProScalp на связи. /help для списка команд.",
+            "/watchlist": lambda _: (
+                f"{md_bold('Watchlist')}\n" + md_code(", ".join(self.watchlist))
+            ),
+            "/scan": lambda _: md_pre(self.run_once(notify=False) or "Скан выполнен."),
+            "/start": lambda _: md_escape("ProScalp на связи. /help — список команд."),
             "_llm_chat": self._cmd_llm_chat,
         }
         # Устанавливаем меню команд в Telegram
@@ -108,14 +113,14 @@ class ProScalpApp:
         parts = text.strip().split()
         if len(parts) == 1:
             return (
-                f"Текущий режим: {self.settings.mode}\n"
-                f"Для переключения: /mode paper или /mode live"
+                f"Текущий режим: {md_code(self.settings.mode)}\n"
+                f"Переключение: {md_code('/mode paper')} или {md_code('/mode live')}"
             )
         target = parts[1].lower()
         if target not in ("paper", "live"):
-            return "Укажи: /mode paper или /mode live"
+            return f"Укажи {md_code('/mode paper')} или {md_code('/mode live')}"
         if target == self.settings.mode:
-            return f"Уже в режиме {target}"
+            return f"Уже в режиме {md_code(target)}"
         # Обновляем .env
         env_path = self.settings.root / ".env"
         try:
@@ -132,20 +137,20 @@ class ProScalpApp:
                 new_lines.append(f"MODE={target}")
             env_path.write_text("\n".join(new_lines) + "\n")
             return (
-                f"✅ Режим переключён: {self.settings.mode} → {target}\n"
-                f"⚠️ Перезапусти бота, чтобы изменения вступили в силу:\n"
-                f"tmux attach -t proscalp-bot, затем Ctrl+C и перезапуск"
+                f"✅ Режим переключён: {md_code(self.settings.mode)} → "
+                f"{md_code(target)}\n"
+                + md_escape("⚠️ Нужен перезапуск, чтобы изменения вступили в силу.")
             )
         except Exception as e:
-            return f"Ошибка записи .env: {e}"
+            return md_escape(f"Ошибка записи .env: {e}")
 
     def _cmd_pause(self, _text: str) -> str:
         self.risk.paused_until = time.time() + 2 * 3600
-        return "Мягкая пауза на 2 часа включена."
+        return md_escape("⏸ Мягкая пауза на 2 часа включена.")
 
     def _cmd_resume(self, _text: str) -> str:
         self.risk.manual_resume()
-        return "Паузы сняты. Торговля по правилам разрешена."
+        return md_escape("▶️ Паузы сняты. Торговля по правилам разрешена.")
 
     def _cmd_llm_chat(self, question: str) -> str:
         """Диалог с LLM: контекст стратегии + произвольный вопрос."""
@@ -168,7 +173,7 @@ class ProScalpApp:
         }
         system = (
             "Ты помощник трейдера, ведущего скальп-бота ProScalp по стратегии playbook S1–S5. "
-            "Отвечай на русском, кратко и по делу. "
+            "Отвечай на русском, кратко и по делу, обычным текстом без разметки. "
             "Контекст стратегии:\n"
             f"{json.dumps(context, ensure_ascii=False, indent=2)}\n"
             "Playbook: S1 true breakout, S2 false breakout от плотности, "
@@ -181,9 +186,11 @@ class ProScalpApp:
                 {"role": "system", "content": system},
                 {"role": "user", "content": question},
             ])
-            return raw[:1500] if raw else "LLM не ответил"
+            # Модель всё равно иногда размечает ответ, а её разметка почти
+            # никогда не валидна для MarkdownV2 — экранируем целиком.
+            return md_escape(raw[:1500]) if raw else md_escape("ИИ не ответил")
         except Exception as e:
-            return f"Ошибка LLM: {e}"
+            return md_escape(f"Ошибка ИИ: {e}")
 
     def balance_text(self) -> str:
         """Баланс с учётом режима: paper показывает deposit, live — реальный."""
@@ -192,62 +199,63 @@ class ProScalpApp:
                 balance = self.settings.deposit_usdt
                 equity = balance + self.risk.day_pnl
                 return (
-                    f"💼 Баланс (paper):\n"
-                    f"Депозит: {balance:.2f} USDT\n"
-                    f"Дневной PnL: {self.risk.day_pnl:+.2f} USDT\n"
-                    f"Эквити: {equity:.2f} USDT"
+                    f"💼 {md_bold('Баланс (paper)')}\n"
+                    f"Депозит: {md_code(f'{balance:.2f} USDT')}\n"
+                    f"Дневной PnL: {md_code(f'{self.risk.day_pnl:+.2f} USDT')}\n"
+                    f"Эквити: {md_code(f'{equity:.2f} USDT')}"
                 )
-            else:
-                wallet = self.bybit.wallet_balance()
-                balances = wallet.get("list") or []
-                if not balances:
-                    return "Не удалось получить баланс"
-                acc = balances[0]
-                total_equity = float(acc.get("totalEquity") or 0)
-                wallet_balance = float(acc.get("totalWalletBalance") or 0)
-                unrealized = float(acc.get("totalPerpUPL") or 0)
-                return (
-                    f"💼 Баланс (live testnet):\n"
-                    f"Баланс: {wallet_balance:.2f} USDT\n"
-                    f"Unrealized PnL: {unrealized:+.2f} USDT\n"
-                    f"Эквити: {total_equity:.2f} USDT"
-                )
+            wallet = self.bybit.wallet_balance()
+            balances = wallet.get("list") or []
+            if not balances:
+                return md_escape("Не удалось получить баланс")
+            acc = balances[0]
+            total_equity = float(acc.get("totalEquity") or 0)
+            wallet_balance = float(acc.get("totalWalletBalance") or 0)
+            unrealized = float(acc.get("totalPerpUPL") or 0)
+            return (
+                f"💼 {md_bold('Баланс (live)')}\n"
+                f"Баланс: {md_code(f'{wallet_balance:.2f} USDT')}\n"
+                f"Нереализованный PnL: {md_code(f'{unrealized:+.2f} USDT')}\n"
+                f"Эквити: {md_code(f'{total_equity:.2f} USDT')}"
+            )
         except Exception as e:
-            return f"Ошибка получения баланса: {e}"
+            return md_escape(f"Ошибка получения баланса: {e}")
 
     def status_text(self) -> str:
         stats = self.paper.journal.stats()
         wr = stats.get("winrate")
         wr_s = f"{wr * 100:.1f}%" if wr is not None else "—"
-        balance_line = ""
+        pnl = stats.get("pnl_usd_total") or 0.0
+        lines = [f"📊 {md_bold('ProScalp')}"]
         try:
             if self.settings.mode == "paper":
                 equity = self.settings.deposit_usdt + self.risk.day_pnl
-                balance_line = f"💼 paper equity={equity:.2f} USDT\n"
             else:
-                wallet = self.bybit.wallet_balance()
-                balances = wallet.get("list") or []
-                if balances:
-                    total_equity = float(balances[0].get("totalEquity") or 0)
-                    balance_line = f"💼 live equity={total_equity:.2f} USDT\n"
+                balances = self.bybit.wallet_balance().get("list") or []
+                equity = float(balances[0].get("totalEquity") or 0) if balances else 0.0
+            lines.append(f"💼 Эквити: {md_code(f'{equity:.2f} USDT')}")
         except Exception:
             pass
-        return (
-            f"📊 ProScalp status\n"
-            f"{balance_line}"
-            f"mode={self.settings.mode} testnet={self.settings.bybit_testnet}\n"
-            f"data={'mainnet' if self.settings.market_data_mainnet else 'testnet'} "
-            f"taker={self.settings.taker_fee_rate_override * 100:.3f}%\n"
-            f"proxy={'on' if self.settings.proxy_enabled else 'off'}\n"
-            f"no_impulse={self.settings.max_seconds_without_impulse}s "
-            f"max_open={self.settings.max_parallel_symbols}\n"
-            f"risk={self.risk.status()} day_pnl={self.risk.day_pnl:.2f} USDT\n"
-            f"watchlist={', '.join(self.watchlist)}\n"
-            f"orderbook_snaps={self.store.count()}\n"
-            f"journal open={stats.get('open_trades')} closed={stats.get('closed_trades')} "
-            f"wr={wr_s} pnl_net={stats.get('pnl_usd_total')}\n"
-            f"playbook=v{self.settings.playbook_version}"
-        )
+        data_src = "mainnet" if self.settings.market_data_mainnet else "testnet"
+        lines += [
+            f"Режим: {md_code(self.settings.mode)} · данные {md_code(data_src)}",
+            f"Комиссия: {md_code(f'{self.settings.taker_fee_rate_override * 100:.3f}%')}"
+            f" · прокси {md_code('вкл' if self.settings.proxy_enabled else 'выкл')}",
+            f"Окно импульса: {md_code(f'{self.settings.max_seconds_without_impulse}с')}"
+            f" · макс позиций {md_code(self.settings.max_parallel_symbols)}",
+            f"Риск: {md_code(self.risk.status())}"
+            f" · дневной PnL {md_code(f'{self.risk.day_pnl:+.2f} USDT')}",
+            "",
+            md_bold("Журнал"),
+            f"Открыто {md_code(stats.get('open_trades'))}"
+            f" · закрыто {md_code(stats.get('closed_trades'))}",
+            f"Винрейт {md_code(wr_s)} · PnL {md_code(f'{pnl:+.4f} USDT')}",
+            "",
+            f"{md_bold('Watchlist')}: {md_code(', '.join(self.watchlist))}",
+            f"Снимков стакана: {md_code(self.store.count())}",
+            f"Playbook: {md_code('v' + self.settings.playbook_version)}",
+        ]
+        return "\n".join(lines)
 
     def refresh_watchlist_ai(self) -> str:
         """Watchlist из символов «в игре»: без хода скальп не окупает комиссию."""
@@ -414,11 +422,17 @@ class ProScalpApp:
             for ev in risk_events:
                 if ev == "soft_pause":
                     self.tg.send(
-                        "⚠️ Мягкая пауза: достигнут 50% дневного лимита (−1%). Пауза 2ч."
+                        md_escape(
+                            "⚠️ Мягкая пауза: достигнут 50% дневного лимита (−1%). "
+                            "Пауза 2 часа."
+                        )
                     )
                 if ev == "hard_stop":
                     self.tg.send(
-                        "🛑 Жёсткий дневной стоп (−2%). Торговля остановлена на 24ч или /resume."
+                        md_escape(
+                            "🛑 Жёсткий дневной стоп (−2%). "
+                            "Торговля остановлена на 24ч или /resume."
+                        )
                     )
 
         summary = (
@@ -445,9 +459,9 @@ class ProScalpApp:
         if notify and (opened or closed):
             parts = []
             if closed:
-                parts.append("Закрыто paper:\n" + "\n".join(closed))
+                parts.append(f"🔻 {md_bold('Закрыто')}\n" + md_pre("\n".join(closed)))
             if opened:
-                parts.append("Открыто paper:\n" + "\n".join(opened))
+                parts.append(f"🟢 {md_bold('Открыто')}\n" + md_pre("\n".join(opened)))
             self.tg.send("\n\n".join(parts))
         return summary
 
@@ -456,15 +470,18 @@ class ProScalpApp:
         self.bybit.server_time()
         self.bybit.wallet_balance()
         self.tg.start_polling()
-        msg = (
-            "✅ ProScalp запущен\n"
-            f"mode={self.settings.mode}, testnet={self.settings.bybit_testnet}\n"
-            f"deposit≈{self.settings.deposit_usdt}$ leverage={self.settings.leverage}x\n"
-            f"AI={self.settings.ollama_model}\n"
-            f"watchlist={', '.join(self.watchlist)}\n"
-            "Команды: /status /scan /watchlist /help"
+        self.tg.send(
+            "\n".join([
+                f"✅ {md_bold('ProScalp запущен')}",
+                f"Режим: {md_code(self.settings.mode)}"
+                f" · депозит {md_code(f'{self.settings.deposit_usdt:.0f} USDT')}"
+                f" · плечо {md_code(f'{self.settings.leverage}x')}",
+                f"ИИ: {md_code(self.settings.ollama_model)}",
+                f"Watchlist: {md_code(', '.join(self.watchlist))}",
+                "",
+                md_escape("Команды: /status /balance /scan /help"),
+            ])
         )
-        self.tg.send(msg)
 
     def run_forever(self, interval_sec: int = 60) -> None:
         self.log.info(
@@ -481,18 +498,21 @@ class ProScalpApp:
         try:
             comment = self.refresh_watchlist_ai()
             self.log.info("watchlist: %s", ", ".join(self.watchlist))
-            self.tg.send(f"Watchlist AI: {', '.join(self.watchlist)}\n{comment[:500]}")
+            self.tg.send(
+                f"{md_bold('Watchlist')}: {md_code(', '.join(self.watchlist))}\n"
+                + md_escape(comment[:500])
+            )
         except Exception as e:
             self.log.exception("watchlist AI недоступен")
-            self.tg.send(f"Watchlist AI временно недоступен: {e}. Использую дефолт.")
+            self.tg.send(md_escape(f"Watchlist ИИ недоступен: {e}. Использую дефолт."))
 
         try:
             summary = self.run_once(notify=True)
             self.watchdog.beat()
-            self.tg.send("Первый скан:\n" + summary[:3500])
+            self.tg.send(f"{md_bold('Первый скан')}\n{md_pre(summary[:3500])}")
         except Exception as e:
             self.log.exception("ошибка первого скана")
-            self.tg.send(f"Ошибка первого скана: {e}")
+            self.tg.send(md_escape(f"Ошибка первого скана: {e}"))
 
         last_watch = time.time()
         while self.running:
@@ -501,13 +521,17 @@ class ProScalpApp:
                 if time.time() - last_watch > 3600:
                     comment = self.refresh_watchlist_ai()
                     self.log.info("watchlist обновлён: %s", ", ".join(self.watchlist))
-                    self.tg.send(f"Watchlist обновлён: {', '.join(self.watchlist)}\n{comment[:400]}")
+                    self.tg.send(
+                        f"{md_bold('Watchlist обновлён')}: "
+                        f"{md_code(', '.join(self.watchlist))}\n"
+                        + md_escape(comment[:400])
+                    )
                     last_watch = time.time()
                 self.run_once(notify=True)
                 self.watchdog.beat()
             except Exception as e:
                 self.log.exception("ошибка цикла")
-                self.tg.send(f"Ошибка цикла: {e}")
+                self.tg.send(md_escape(f"Ошибка цикла: {e}"))
 
 
 def main() -> None:

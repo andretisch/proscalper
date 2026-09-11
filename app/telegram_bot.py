@@ -12,11 +12,39 @@ from app.logging_setup import get_logger
 
 log = get_logger("telegram")
 
+# MarkdownV2 требует экранировать каждый из этих символов в обычном тексте,
+# иначе Telegram отвечает 400 и сообщение теряется целиком.
+_MD_SPECIAL = set(r"_*[]()~`>#+-=|{}.!\\")
+
+_UNSET = object()
+
+
+def md_escape(text: object) -> str:
+    """Экранировать текст для MarkdownV2."""
+    return "".join(("\\" + ch if ch in _MD_SPECIAL else ch) for ch in str(text))
+
+
+def md_code(text: object) -> str:
+    """Моноширинный фрагмент: внутри экранируются только ` и обратный слэш."""
+    body = str(text).replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{body}`"
+
+
+def md_pre(text: object) -> str:
+    """Многострочный блок: однострочный `code` ломается на переводах строки."""
+    body = str(text).replace("\\", "\\\\").replace("`", "\\`")
+    return f"```\n{body}\n```"
+
+
+def md_bold(text: object) -> str:
+    return f"*{md_escape(text)}*"
+
 
 class TelegramBot:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, parse_mode: str | None = "MarkdownV2") -> None:
         self.s = settings
         self.session = make_session(settings)
+        self.parse_mode = parse_mode
         self.base = f"https://api.telegram.org/bot{settings.telegram_token}"
         self._offset = 0
         self._stop = threading.Event()
@@ -35,19 +63,40 @@ class TelegramBot:
         except Exception:
             return False
 
-    def send(self, text: str, chat_id: str | None = None) -> bool:
-        """Не бросает исключений: сбой уведомления не должен убивать торговый цикл."""
+    def send(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        parse_mode: str | None | object = _UNSET,
+    ) -> bool:
+        """Не бросает исключений: сбой уведомления не должен убивать торговый цикл.
+
+        Разметка — не повод потерять сообщение: если Telegram отвергает её
+        (непарный `_` в имени сетапа, неэкранированный минус в PnL), тот же
+        текст уходит повторно без parse_mode.
+        """
         cid = chat_id or self.s.telegram_chat_id
         if not cid or not self.s.telegram_token:
             return False
+        mode = self.parse_mode if parse_mode is _UNSET else parse_mode
         for attempt in range(3):
             try:
+                payload: dict[str, object] = {"chat_id": cid, "text": text[:4000]}
+                if mode:
+                    payload["parse_mode"] = mode
                 r = self.session.post(
-                    f"{self.base}/sendMessage",
-                    json={"chat_id": cid, "text": text[:4000]},
-                    timeout=30,
+                    f"{self.base}/sendMessage", json=payload, timeout=30
                 )
-                return bool(r.json().get("ok"))
+                data = r.json()
+                if data.get("ok"):
+                    return True
+                description = str(data.get("description") or "")
+                if mode and "parse" in description.lower():
+                    log.warning("разметка отклонена (%s), шлю без неё", description[:90])
+                    mode = None
+                    continue
+                log.warning("telegram отказал: %s", description[:120])
+                return False
             except Exception as e:
                 log.warning("обрыв отправки (попытка %s/3): %s", attempt + 1, e)
                 if attempt == 2:
@@ -77,7 +126,7 @@ class TelegramBot:
         if not text or not chat_id:
             return
         if self.s.telegram_chat_id and chat_id != self.s.telegram_chat_id:
-            self.send("Нет доступа.", chat_id=chat_id)
+            self.send(md_escape("Нет доступа."), chat_id=chat_id)
             return
         cmd = text.split()[0].split("@")[0].lower()
         handler = self.command_handlers.get(cmd)
@@ -90,8 +139,9 @@ class TelegramBot:
                 reply = fallback(text)
             else:
                 reply = (
-                    "Команды: /status /balance /mode /pause /resume /watchlist /help\n"
-                    f"Получено: {text[:100]}"
+                    md_escape("Команды: /status /balance /mode /pause /resume /help")
+                    + "\n"
+                    + md_code(text[:100])
                 )
         self.send(reply, chat_id=chat_id)
 
