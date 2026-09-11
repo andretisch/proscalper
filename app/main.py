@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -61,6 +62,10 @@ class ProScalpApp:
         self.watchlist = list(DEFAULT_WATCH)
         self.running = True
         self.cycle = 0
+        # Торговый цикл идёт в главном потоке, а /scan — в потоке Telegram.
+        # Без замка два цикла могли открыть две сделки по одному символу:
+        # между проверкой open_symbols() и записью в журнал есть зазор.
+        self._trade_lock = threading.RLock()
         self.watchdog = Watchdog(
             timeout_sec=self.settings.watchdog_timeout_sec,
             on_stall=self._on_stall,
@@ -113,7 +118,7 @@ class ProScalpApp:
             "/watchlist": lambda _: (
                 f"{md_bold('Watchlist')}\n" + md_code(", ".join(self.watchlist))
             ),
-            "/scan": lambda _: md_pre(self.run_once(notify=False) or "Скан выполнен."),
+            "/scan": self._cmd_scan,
             "/start": lambda _: md_escape("ProScalp на связи. /help — список команд."),
             "_llm_chat": self._cmd_llm_chat,
         }
@@ -164,6 +169,15 @@ class ProScalpApp:
             )
         except Exception as e:
             return md_escape(f"Ошибка записи .env: {e}")
+
+    def _cmd_scan(self, _text: str) -> str:
+        """Ручной скан не должен идти параллельно с автоматическим."""
+        if not self._trade_lock.acquire(blocking=False):
+            return md_escape("Цикл уже идёт — ручной скан пропущен, попробуй позже.")
+        try:
+            return md_pre(self.run_once(notify=False) or "Скан выполнен.")
+        finally:
+            self._trade_lock.release()
 
     def _cmd_pause(self, _text: str) -> str:
         self.risk.pause(2 * 3600)
@@ -349,6 +363,10 @@ class ProScalpApp:
         return books
 
     def run_once(self, notify: bool = True) -> str:
+        with self._trade_lock:
+            return self._run_once(notify=notify)
+
+    def _run_once(self, notify: bool = True) -> str:
         self.cycle += 1
         deadline = time.time() + self.settings.cycle_budget_sec
         can, why = self.risk.can_open()

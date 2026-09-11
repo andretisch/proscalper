@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -34,9 +35,15 @@ class RiskState:
     max_consecutive_losses: int = 3
     # Вызывается после каждого изменения счётчиков — сюда вешается запись в БД.
     on_change: Callable[[], None] | None = None
+    # Счётчики меняет торговый поток, а /pause и /resume — поток Telegram.
+    # Повторный вход нужен: register_pnl вызывает _roll_day под тем же замком.
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
 
     def snapshot(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in _PERSISTED}
+        with self._lock:
+            return {name: getattr(self, name) for name in _PERSISTED}
 
     def restore(self, data: dict[str, Any]) -> None:
         """Поднять счётчики дня из хранилища.
@@ -45,16 +52,17 @@ class RiskState:
         накопленный убыток и активные паузы менять нельзя — иначе
         перезапуск превращается в обход дневного стопа.
         """
-        for name in _PERSISTED:
-            value = data.get(name)
-            if value is None:
-                continue
-            try:
-                current = getattr(self, name)
-                setattr(self, name, type(current)(value))
-            except (TypeError, ValueError):
-                log.warning("состояние риска: поле %s испорчено", name)
-        self._roll_day()
+        with self._lock:
+            for name in _PERSISTED:
+                value = data.get(name)
+                if value is None:
+                    continue
+                try:
+                    current = getattr(self, name)
+                    setattr(self, name, type(current)(value))
+                except (TypeError, ValueError):
+                    log.warning("состояние риска: поле %s испорчено", name)
+            self._roll_day()
 
     def _persist(self) -> None:
         if self.on_change is None:
@@ -75,14 +83,18 @@ class RiskState:
         return True
 
     def status(self) -> str:
-        if self._roll_day():
+        with self._lock:
+            rolled = self._roll_day()
+            now = time.time()
+            if now < self.hard_stopped_until:
+                state = "hard_stop"
+            elif now < self.paused_until:
+                state = "soft_pause"
+            else:
+                state = "ok"
+        if rolled:
             self._persist()
-        now = time.time()
-        if now < self.hard_stopped_until:
-            return "hard_stop"
-        if now < self.paused_until:
-            return "soft_pause"
-        return "ok"
+        return state
 
     def can_open(self) -> tuple[bool, str]:
         st = self.status()
@@ -101,37 +113,40 @@ class RiskState:
         return max(risk_usd / stop_dist, 0.0)
 
     def register_pnl(self, pnl: float) -> list[str]:
-        self._roll_day()
-        self.day_pnl += pnl
         events: list[str] = []
-        if pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
+        with self._lock:
+            self._roll_day()
+            self.day_pnl += pnl
+            if pnl < 0:
+                self.consecutive_losses += 1
+            else:
+                self.consecutive_losses = 0
 
-        soft = -self.deposit * (self.soft_pause_pct / 100.0)
-        hard = -self.deposit * (self.daily_loss_limit_pct / 100.0)
-        if self.day_pnl <= hard and self.hard_stopped_until < time.time():
-            self.hard_stopped_until = time.time() + 86400
-            events.append("hard_stop")
-        elif self.day_pnl <= soft and self.paused_until < time.time():
-            self.paused_until = time.time() + 2 * 3600
-            events.append("soft_pause")
-        elif (
-            self.max_consecutive_losses > 0
-            and self.consecutive_losses >= self.max_consecutive_losses
-            and self.paused_until < time.time()
-        ):
-            self.paused_until = time.time() + 2 * 3600
-            events.append("soft_pause")
+            soft = -self.deposit * (self.soft_pause_pct / 100.0)
+            hard = -self.deposit * (self.daily_loss_limit_pct / 100.0)
+            if self.day_pnl <= hard and self.hard_stopped_until < time.time():
+                self.hard_stopped_until = time.time() + 86400
+                events.append("hard_stop")
+            elif self.day_pnl <= soft and self.paused_until < time.time():
+                self.paused_until = time.time() + 2 * 3600
+                events.append("soft_pause")
+            elif (
+                self.max_consecutive_losses > 0
+                and self.consecutive_losses >= self.max_consecutive_losses
+                and self.paused_until < time.time()
+            ):
+                self.paused_until = time.time() + 2 * 3600
+                events.append("soft_pause")
         self._persist()
         return events
 
     def pause(self, seconds: float) -> None:
-        self.paused_until = time.time() + seconds
+        with self._lock:
+            self.paused_until = time.time() + seconds
         self._persist()
 
     def manual_resume(self) -> None:
-        self.paused_until = 0.0
-        self.hard_stopped_until = 0.0
+        with self._lock:
+            self.paused_until = 0.0
+            self.hard_stopped_until = 0.0
         self._persist()
