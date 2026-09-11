@@ -66,6 +66,7 @@ class ProScalpApp:
         # Без замка два цикла могли открыть две сделки по одному символу:
         # между проверкой open_symbols() и записью в журнал есть зазор.
         self._trade_lock = threading.RLock()
+        self._snapshot_thread: threading.Thread | None = None
         self.watchdog = Watchdog(
             timeout_sec=self.settings.watchdog_timeout_sec,
             on_stall=self._on_stall,
@@ -293,11 +294,12 @@ class ProScalpApp:
         return "\n".join(lines)
 
     def prune_history(self) -> None:
-        """Обрезать историю стакана: на маленьком сервере диск кончится быстрее нервов."""
+        """Обрезка только если явно задан ORDERBOOK_RETENTION_DAYS > 0."""
+        days = self.settings.orderbook_retention_days
+        if days <= 0:
+            return
         try:
-            removed = self.store.prune(
-                self.settings.orderbook_retention_days, vacuum=True
-            )
+            removed = self.store.prune(days, vacuum=True)
             if removed:
                 self.log.info(
                     "история стакана обрезана: удалено %s снимков, осталось %s",
@@ -306,6 +308,70 @@ class ProScalpApp:
                 )
         except Exception:
             self.log.exception("не удалось обрезать историю стакана")
+
+    def _fetch_book_snap(
+        self,
+        symbol: str,
+        category: str,
+        mtype: str,
+        *,
+        deadline: float | None = None,
+        track_walls: bool = False,
+    ) -> dict | None:
+        try:
+            raw = self.bybit.orderbook(
+                symbol,
+                category=category,
+                limit=self.settings.book_depth_limit,
+                deadline=deadline,
+            )
+            snap = OrderBookStore.parse_book(
+                raw,
+                mtype,
+                self.settings.wall_max_dist_pct,
+                scan_pct=self.settings.wall_scan_pct,
+                min_wall_dist_pct=self.settings.wall_min_dist_pct,
+                min_depth_share=self.settings.wall_min_depth_share,
+                min_wall_ratio=self.settings.wall_min_ratio,
+            )
+            snap["symbol"] = symbol
+            self.store.save(snap)
+            if track_walls and mtype == "perp":
+                self.walls.observe(symbol, snap.get("density"))
+            return snap
+        except Exception:
+            return None
+
+    def _snapshot_loop(self) -> None:
+        """Фоновая запись стакана между торговыми циклами."""
+        interval = self.settings.orderbook_snapshot_interval_sec
+        self.log.info(
+            "сбор стакана в фоне: каждые %.0f с, символов %s",
+            interval,
+            len(self.watchlist),
+        )
+        while self.running:
+            for symbol in list(self.watchlist):
+                if not self.running:
+                    break
+                self._fetch_book_snap(symbol, "linear", "perp")
+                self._fetch_book_snap(symbol, "spot", "spot")
+                time.sleep(0.05)
+            deadline = time.time() + interval
+            while self.running and time.time() < deadline:
+                time.sleep(min(1.0, deadline - time.time()))
+
+    def _start_snapshot_collector(self) -> None:
+        interval = self.settings.orderbook_snapshot_interval_sec
+        if interval <= 0:
+            self.log.info("фоновый сбор стакана выключен (ORDERBOOK_SNAPSHOT_INTERVAL_SEC=0)")
+            return
+        if self._snapshot_thread and self._snapshot_thread.is_alive():
+            return
+        self._snapshot_thread = threading.Thread(
+            target=self._snapshot_loop, name="ob-snap", daemon=True
+        )
+        self._snapshot_thread.start()
 
     def refresh_watchlist_ai(self) -> str:
         """Watchlist из символов «в игре»: без хода скальп не окупает комиссию."""
@@ -340,41 +406,30 @@ class ProScalpApp:
                     len(self.watchlist),
                 )
                 break
-            for category, mtype in (("linear", "perp"), ("spot", "spot")):
-                try:
-                    raw = self.bybit.orderbook(
-                        symbol,
-                        category=category,
-                        limit=self.settings.book_depth_limit,
-                        deadline=deadline,
-                    )
-                    snap = OrderBookStore.parse_book(
-                        raw,
-                        mtype,
-                        self.settings.wall_max_dist_pct,
-                        scan_pct=self.settings.wall_scan_pct,
-                        min_wall_dist_pct=self.settings.wall_min_dist_pct,
-                        min_depth_share=self.settings.wall_min_depth_share,
-                        min_wall_ratio=self.settings.wall_min_ratio,
-                    )
-                    snap["symbol"] = symbol
-                    self.store.save(snap)
-                    if mtype == "perp":
-                        self.walls.observe(symbol, snap.get("density"))
-                        books[symbol] = snap
-                    elif symbol in books:
-                        books[symbol]["spot_wall"] = {
-                            "side": snap.get("wall_side"),
-                            "price": snap.get("wall_price"),
-                            "size": snap.get("wall_size"),
-                        }
-                except Exception:
-                    continue
-                finally:
-                    # Медленный цикл — не зависший: пока есть прогресс,
-                    # сторож не должен считать процесс мёртвым.
-                    self.watchdog.beat()
-                time.sleep(0.05)
+            try:
+                snap = self._fetch_book_snap(
+                    symbol,
+                    "linear",
+                    "perp",
+                    deadline=deadline,
+                    track_walls=True,
+                )
+                if snap:
+                    books[symbol] = snap
+                spot = self._fetch_book_snap(
+                    symbol, "spot", "spot", deadline=deadline
+                )
+                if spot and symbol in books:
+                    books[symbol]["spot_wall"] = {
+                        "side": spot.get("wall_side"),
+                        "price": spot.get("wall_price"),
+                        "size": spot.get("wall_size"),
+                    }
+            finally:
+                # Медленный цикл — не зависший: пока есть прогресс,
+                # сторож не должен считать процесс мёртвым.
+                self.watchdog.beat()
+            time.sleep(0.05)
         return books
 
     def run_once(self, notify: bool = True) -> str:
@@ -599,6 +654,8 @@ class ProScalpApp:
             self.tg.send_async(
                 md_escape(f"Watchlist ИИ недоступен: {e}. Использую дефолт.")
             )
+
+        self._start_snapshot_collector()
 
         try:
             summary = self.run_once(notify=True)

@@ -192,12 +192,7 @@ class OrderBookStore:
             return int(conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
 
     def prune(self, retention_days: float, vacuum: bool = False) -> int:
-        """Удалить старые снимки.
-
-        Каждый снимок весит около 7.5 КБ, за сутки непрерывной работы
-        набегает ~70 МБ. Сигналам нужны минуты истории, а не месяцы, так что
-        без обрезки диск маленького сервера кончится за пару недель.
-        """
+        """Удалить снимки старше retention_days. 0 — не трогать базу."""
         if retention_days <= 0:
             return 0
         cutoff = time.time() - retention_days * 86400
