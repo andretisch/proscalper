@@ -81,6 +81,7 @@ class Settings:
     http_retry_attempts: int
     socket_timeout_sec: float
     cycle_budget_sec: float
+    orderbook_retention_days: float
 
     @property
     def http_timeout(self) -> tuple[float, float]:
@@ -166,6 +167,7 @@ def load_settings() -> Settings:
         http_retry_attempts=int(_float(os.getenv("HTTP_RETRY_ATTEMPTS"), 3)),
         socket_timeout_sec=_float(os.getenv("SOCKET_TIMEOUT_SEC"), 90.0),
         cycle_budget_sec=_float(os.getenv("CYCLE_BUDGET_SEC"), 240.0),
+        orderbook_retention_days=_float(os.getenv("ORDERBOOK_RETENTION_DAYS"), 3.0),
     )
     from app.http_client import apply_proxy_env, install_socket_backstop
 

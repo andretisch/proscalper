@@ -127,6 +127,39 @@ def test_cooldown_survives_restart(tmp_path):
     assert restarted.cooldown_left("SOLUSDT") > 0
 
 
+def test_history_prune_keeps_recent_snapshots(tmp_path):
+    from app.orderbook_store import OrderBookStore
+
+    store = OrderBookStore(tmp_path / "ob.sqlite3")
+    now = time.time()
+    for age_days, symbol in ((10, "старый"), (0.5, "свежий")):
+        store.save({
+            "ts": now - age_days * 86400,
+            "symbol": symbol,
+            "market_type": "perp",
+            "bids": [],
+            "asks": [],
+        })
+    assert store.count() == 2
+    assert store.prune(retention_days=3) == 1
+    assert store.count() == 1
+
+
+def test_history_prune_disabled_by_zero(tmp_path):
+    from app.orderbook_store import OrderBookStore
+
+    store = OrderBookStore(tmp_path / "ob.sqlite3")
+    store.save({
+        "ts": time.time() - 100 * 86400,
+        "symbol": "древний",
+        "market_type": "perp",
+        "bids": [],
+        "asks": [],
+    })
+    assert store.prune(retention_days=0) == 0
+    assert store.count() == 1
+
+
 def test_expired_cooldown_is_dropped_on_load(tmp_path):
     store = StateStore(tmp_path / "data" / "journal" / "journal.sqlite3")
     store.save("cooldown", {"SOLUSDT": time.time() - 10, "XRPUSDT": "мусор"})
