@@ -292,6 +292,21 @@ class ProScalpApp:
         ]
         return "\n".join(lines)
 
+    def prune_history(self) -> None:
+        """Обрезать историю стакана: на маленьком сервере диск кончится быстрее нервов."""
+        try:
+            removed = self.store.prune(
+                self.settings.orderbook_retention_days, vacuum=True
+            )
+            if removed:
+                self.log.info(
+                    "история стакана обрезана: удалено %s снимков, осталось %s",
+                    removed,
+                    self.store.count(),
+                )
+        except Exception:
+            self.log.exception("не удалось обрезать историю стакана")
+
     def refresh_watchlist_ai(self) -> str:
         """Watchlist из символов «в игре»: без хода скальп не окупает комиссию."""
         candidates = rank_candidates(
@@ -598,6 +613,7 @@ class ProScalpApp:
             time.sleep(interval_sec)
             try:
                 if time.time() - last_watch > 3600:
+                    self.prune_history()
                     comment = self.refresh_watchlist_ai()
                     self.log.info("watchlist обновлён: %s", ", ".join(self.watchlist))
                     self.tg.send_async(
