@@ -16,21 +16,27 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Первый ответ — отказ парсера, дальше успех."""
+    """Отдаёт заготовленные ответы по порядку, последний повторяется."""
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
         self.calls: list[dict] = []
+        self.urls: list[str] = []
 
     def post(self, url: str, json: dict, timeout: int):  # noqa: A002
+        self.urls.append(url)
+        if url.endswith("sendChatAction"):
+            return _FakeResponse({"ok": True})
         self.calls.append(json)
-        return _FakeResponse(self.replies[min(len(self.calls) - 1, len(self.replies) - 1)])
+        idx = min(len(self.calls) - 1, len(self.replies) - 1)
+        return _FakeResponse(self.replies[idx])
 
 
 def _bot(replies: list[dict], parse_mode: str | None = "MarkdownV2") -> TelegramBot:
     bot = object.__new__(TelegramBot)
     bot.s = SimpleNamespace(telegram_chat_id="42", telegram_token="t")
-    bot.session = _FakeSession(replies)
+    session = _FakeSession(replies)
+    bot._sessions = SimpleNamespace(get=lambda: session)
     bot.parse_mode = parse_mode
     bot.base = "https://example.invalid"
     bot.command_handlers = {}

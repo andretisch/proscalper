@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Callable
 
 from app.config import Settings
-from app.http_client import make_session
+from app.http_client import SessionPool
 from app.logging_setup import get_logger
 
 log = get_logger("telegram")
@@ -43,13 +44,18 @@ def md_bold(text: object) -> str:
 class TelegramBot:
     def __init__(self, settings: Settings, parse_mode: str | None = "MarkdownV2") -> None:
         self.s = settings
-        self.session = make_session(settings)
+        self._sessions = SessionPool(settings)
         self.parse_mode = parse_mode
         self.base = f"https://api.telegram.org/bot{settings.telegram_token}"
         self._offset = 0
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
+        self._inbox: queue.Queue[dict] = queue.Queue(maxsize=100)
         self.command_handlers: dict[str, Callable[[str], str]] = {}
+
+    @property
+    def session(self):
+        return self._sessions.get()
 
     def set_commands(self, commands: list[dict[str, str]]) -> bool:
         """Установить меню команд бота (кнопка слева от поля ввода)."""
@@ -118,6 +124,17 @@ class TelegramBot:
             self._offset = max(self._offset, int(u["update_id"]) + 1)
         return updates
 
+    def typing(self, chat_id: str) -> None:
+        """Показать «печатает»: команда может считать баланс и стакан."""
+        try:
+            self.session.post(
+                f"{self.base}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
     def handle_update(self, update: dict) -> None:
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
@@ -129,37 +146,70 @@ class TelegramBot:
             self.send(md_escape("Нет доступа."), chat_id=chat_id)
             return
         cmd = text.split()[0].split("@")[0].lower()
-        handler = self.command_handlers.get(cmd)
-        if handler:
-            reply = handler(text)
-        else:
-            # Нет команды — передаём в LLM для диалога
-            fallback = self.command_handlers.get("_llm_chat")
-            if fallback:
-                reply = fallback(text)
+        # Нет команды — передаём в LLM для диалога
+        handler = self.command_handlers.get(cmd) or self.command_handlers.get(
+            "_llm_chat"
+        )
+        log.info("сообщение от %s: %s", chat_id, text[:80])
+        self.typing(chat_id)
+        started = time.time()
+        try:
+            if handler:
+                reply = handler(text)
             else:
                 reply = (
                     md_escape("Команды: /status /balance /mode /pause /resume /help")
                     + "\n"
                     + md_code(text[:100])
                 )
+        except Exception as e:
+            # Молчание хуже ошибки: пользователь должен понять, что бот жив.
+            log.exception("обработчик %s упал", cmd)
+            reply = md_escape(f"Ошибка обработки {cmd}: {e}")
+        elapsed = time.time() - started
+        if elapsed > 15:
+            log.warning("ответ на %s готовился %.0fс", cmd, elapsed)
         self.send(reply, chat_id=chat_id)
 
     def start_polling(self) -> None:
-        # ensure no webhook
-        self.session.get(f"{self.base}/deleteWebhook", timeout=20)
+        try:
+            self.session.get(f"{self.base}/deleteWebhook", timeout=20)
+        except Exception as e:
+            log.warning("не удалось снять webhook: %s", e)
 
-        def loop() -> None:
+        def poll() -> None:
+            """Только забирает апдейты.
+
+            Обработчик может уйти в сеть на десятки секунд (баланс, ИИ), и
+            раньше это вешало сам опрос: остальные сообщения не забирались
+            вовсе, бот выглядел мёртвым.
+            """
             while not self._stop.is_set():
                 try:
                     for u in self.get_updates():
-                        self.handle_update(u)
+                        try:
+                            self._inbox.put_nowait(u)
+                        except queue.Full:
+                            log.warning("очередь сообщений переполнена")
                 except Exception as e:
                     log.warning("обрыв polling: %s", e)
                     time.sleep(3)
 
-        self._thread = threading.Thread(target=loop, name="tg-poll", daemon=True)
-        self._thread.start()
+        def work() -> None:
+            while not self._stop.is_set():
+                try:
+                    update = self._inbox.get(timeout=1)
+                except queue.Empty:
+                    continue
+                try:
+                    self.handle_update(update)
+                except Exception:
+                    log.exception("ошибка обработки сообщения")
+
+        for target, name in ((poll, "tg-poll"), (work, "tg-work")):
+            thread = threading.Thread(target=target, name=name, daemon=True)
+            thread.start()
+            self._threads.append(thread)
 
     def stop(self) -> None:
         self._stop.set()

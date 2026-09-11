@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import TYPE_CHECKING
 
 import requests
@@ -45,3 +46,28 @@ def make_session(settings: Settings) -> requests.Session:
     if proxies:
         session.proxies.update(proxies)
     return session
+
+
+class SessionPool:
+    """Свой Session на поток.
+
+    requests.Session не потокобезопасен, а клиенты дёргаются одновременно
+    из торгового цикла и из Telegram. Общий пул соединений означает, что
+    25-секундный long-poll держит соединение, пока ответ на команду ждёт.
+    """
+
+    def __init__(
+        self, settings: Settings, headers: dict[str, str] | None = None
+    ) -> None:
+        self._settings = settings
+        self._headers = headers or {}
+        self._local = threading.local()
+
+    def get(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = make_session(self._settings)
+            if self._headers:
+                session.headers.update(self._headers)
+            self._local.session = session
+        return session

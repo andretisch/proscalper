@@ -6,13 +6,17 @@ import json
 from typing import Any
 
 from app.config import Settings
-from app.http_client import make_session
+from app.http_client import SessionPool
 
 
 class OllamaClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
-        self.session = make_session(settings)
+        self._sessions = SessionPool(settings)
+
+    @property
+    def session(self):
+        return self._sessions.get()
 
     def chat(self, messages: list[dict[str, str]], timeout: int = 60) -> str:
         url = f"{self.s.ollama_host}/api/chat"
