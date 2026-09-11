@@ -87,7 +87,9 @@ class OllamaClient:
         )
         return _parse_json_decision(raw)
 
-    def decide_manage(self, position: dict[str, Any]) -> dict[str, Any]:
+    def decide_manage(
+        self, position: dict[str, Any], deadline: float | None = None
+    ) -> dict[str, Any]:
         system = (
             "Ты риск-офицер ProScalp, ведёшь ОТКРЫТУЮ paper-сделку. "
             "Ответь СТРОГО JSON:\n"
@@ -111,6 +113,7 @@ class OllamaClient:
                 },
             ],
             timeout=45,
+            deadline=deadline,
         )
         data = _parse_json_decision(raw, default_key="action")
         action = str(data.get("action") or data.get("decision") or "hold").lower()

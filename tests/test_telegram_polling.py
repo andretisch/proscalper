@@ -23,6 +23,8 @@ def _bot() -> TelegramBot:
     bot._stop = threading.Event()
     bot._threads = []
     bot._inbox = queue.Queue(maxsize=100)
+    bot._outbox = queue.Queue(maxsize=200)
+    bot._sender = None
     bot.command_handlers = {}
     bot.sent = []
     bot.send = lambda text, chat_id=None, **_: bot.sent.append(text) or True
@@ -87,6 +89,40 @@ def test_unknown_text_goes_to_llm_chat():
     bot.command_handlers = {"_llm_chat": lambda t: f"ответ на {t}"}
     bot.handle_update(_message("привет"))
     assert bot.sent == ["ответ на привет"]
+
+
+def test_notification_does_not_block_the_caller():
+    bot = _bot()
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow_send(text, chat_id=None, **_):
+        started.set()
+        release.wait(5)
+        bot.sent.append(text)
+        return True
+
+    bot.send = slow_send
+    bot.get_updates = lambda: (time.sleep(0.01), [])[1]
+    bot.start_polling()
+    try:
+        t0 = time.time()
+        bot.send_async("сделка закрыта")
+        # Торговый цикл обязан продолжиться, не дожидаясь Telegram.
+        assert time.time() - t0 < 0.2
+        assert started.wait(2)
+        assert not bot.sent
+    finally:
+        release.set()
+        bot.stop()
+    time.sleep(0.2)
+    assert bot.sent == ["сделка закрыта"]
+
+
+def test_notification_falls_back_to_sync_without_sender():
+    bot = _bot()
+    bot.send_async("без потока отправки")
+    assert bot.sent == ["без потока отправки"]
 
 
 def test_foreign_chat_is_rejected():

@@ -10,13 +10,27 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
+import traceback
 from typing import Callable
 
 from app.logging_setup import get_logger
 
 log = get_logger("watchdog")
+
+
+def dump_threads() -> None:
+    """Записать стеки всех потоков.
+
+    Без этого зависание видно только как пропавшие циклы: непонятно, встал
+    процесс на стакане, на ИИ или на отправке в Telegram.
+    """
+    names = {t.ident: t.name for t in threading.enumerate()}
+    for ident, frame in sys._current_frames().items():
+        stack = "".join(traceback.format_stack(frame)).rstrip()
+        log.critical("стек потока %s:\n%s", names.get(ident, ident), stack)
 
 
 class Watchdog:
@@ -54,6 +68,7 @@ class Watchdog:
                     idle,
                     self.timeout_sec,
                 )
+                dump_threads()
                 if self.on_stall is not None:
                     try:
                         self.on_stall(idle)
