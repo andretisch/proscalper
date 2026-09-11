@@ -1,0 +1,41 @@
+[Unit]
+Description=ProScalp — автоскальп Bybit
+Documentation=https://github.com/andretisch/proscalper
+After=network-online.target
+Wants=network-online.target
+
+# Без лимита частоты systemd сдаётся после 5 перезапусков за 10 с и
+# оставляет бота выключенным — на нестабильной сети это гарантия простоя.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=proscalp
+WorkingDirectory=/opt/proscalp
+# .env читает сам app через dotenv. EnvironmentFile здесь не нужен и вреден:
+# парсер systemd строже, и значение с пробелом или '#' уронит весь сервис.
+Environment=PYTHONPATH=/opt/proscalp
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/proscalp/.venv/bin/python -m app
+
+# Сторож завершает процесс кодом 75, когда цикл перестаёт отвечать.
+# Перезапуск нужен всегда, кроме явной остановки через systemctl stop.
+Restart=always
+RestartSec=10
+
+# 512 МБ на сервере: боту хватает ~45 МБ, но утечка не должна утянуть
+# за собой SSH. При превышении процесс убивается и перезапускается.
+MemoryMax=256M
+
+# Журнал пишет сам, systemd дублировать не нужно.
+StandardOutput=null
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/proscalp/data /opt/proscalp/logs
+
+[Install]
+WantedBy=multi-user.target
