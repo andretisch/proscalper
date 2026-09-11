@@ -14,6 +14,22 @@ def _reset() -> None:
         h.close()
 
 
+def test_secrets_are_redacted_in_file(tmp_path):
+    _reset()
+    try:
+        setup_logging(tmp_path)
+        get_logger("test").warning(
+            "обрыв https://api.telegram.org/bot405270881:AAHdZWuGRN/sendMessage "
+            "через http://bot:s3cret@vps1001.example.ru:3128"
+        )
+        written = (tmp_path / "logs" / "proscalp.log").read_text()
+        assert "405270881" not in written
+        assert "s3cret" not in written
+        assert "/bot<токен>" in written
+    finally:
+        _reset()
+
+
 def test_creates_log_file(tmp_path):
     _reset()
     try:

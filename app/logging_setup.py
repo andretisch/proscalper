@@ -8,12 +8,39 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOGGER_NAME = "proscalp"
 _FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+
+# Токен Telegram лежит в пути URL, пароль прокси — в его authority. Текст
+# сетевых ошибок печатает URL целиком, и это попадает в лог как есть.
+_SECRETS = (
+    (re.compile(r"/bot\d+:[\w-]+"), "/bot<токен>"),
+    (re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)"), "<логин:пароль>"),
+    (re.compile(r"Bearer\s+[\w.\-]+"), "Bearer <ключ>"),
+)
+
+
+def redact(text: object) -> str:
+    out = str(text)
+    for pattern, replacement in _SECRETS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Чистит уже собранную строку.
+
+    Фильтровать свои вызовы недостаточно: urllib3 логирует повторы запроса
+    вместе с URL, а туда токен Telegram попадает целиком.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
 
 
 class _FlushingFileHandler(RotatingFileHandler):
@@ -35,7 +62,7 @@ def setup_logging(
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(_FORMAT)
+    formatter = _RedactingFormatter(_FORMAT)
 
     file_handler = _FlushingFileHandler(
         log_dir / "proscalp.log", maxBytes=max_bytes, backupCount=backups
@@ -50,8 +77,10 @@ def setup_logging(
     # Сетевые библиотеки шумят на каждый запрос, но их предупреждения о
     # разрывах соединения нужны — оставляем только уровень WARNING.
     for noisy in ("urllib3", "requests"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-        logging.getLogger(noisy).addHandler(file_handler)
+        noisy_logger = logging.getLogger(noisy)
+        noisy_logger.setLevel(logging.WARNING)
+        noisy_logger.addHandler(file_handler)
+        noisy_logger.addHandler(stream)
 
     return logger
 

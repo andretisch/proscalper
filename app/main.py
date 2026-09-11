@@ -17,6 +17,7 @@ from app.paper import PaperBroker
 from app.paper_exec import entry_fill_price
 from app.risk import RiskState
 from app.signals import detect_signals
+from app.state_store import StateStore
 from app.telegram_bot import TelegramBot, md_bold, md_code, md_escape, md_pre
 from app.wall_tracker import WallTracker
 from app.watchdog import Watchdog
@@ -36,6 +37,9 @@ class ProScalpApp:
         self.store = OrderBookStore(
             self.settings.root / "data" / "orderbook" / "history.sqlite3"
         )
+        self.state = StateStore(
+            self.settings.root / "data" / "journal" / "journal.sqlite3"
+        )
         self.risk = RiskState(
             deposit=self.settings.deposit_usdt,
             risk_per_trade_pct=self.settings.risk_per_trade_pct,
@@ -43,7 +47,8 @@ class ProScalpApp:
             soft_pause_pct=self.settings.soft_pause_pct,
             max_consecutive_losses=self.settings.max_consecutive_losses,
         )
-        self.paper = PaperBroker(self.settings, self.risk)
+        self._restore_risk()
+        self.paper = PaperBroker(self.settings, self.risk, state=self.state)
         self.ai = OllamaClient(self.settings)
         self.tg = TelegramBot(self.settings)
         self.walls = WallTracker(
@@ -61,6 +66,22 @@ class ProScalpApp:
             on_stall=self._on_stall,
         )
         self._register_commands()
+
+    def _restore_risk(self) -> None:
+        """Поднять счётчики дня: перезапуск не должен обнулять дневной лимит."""
+        stored = self.state.load("risk")
+        if stored:
+            self.risk.restore(stored)
+            self.log.info(
+                "состояние риска восстановлено: дневной PnL=%.4f серия убытков=%s %s",
+                self.risk.day_pnl,
+                self.risk.consecutive_losses,
+                self.risk.status(),
+            )
+        self.risk.on_change = lambda: self.state.save("risk", self.risk.snapshot())
+        # Пишем сразу: иначе до первой закрытой сделки в хранилище пусто,
+        # и перезапуск в этом окне терял бы начало дня.
+        self.risk.on_change()
 
     def _on_stall(self, idle_sec: float) -> None:
         self.tg.send(
@@ -145,7 +166,7 @@ class ProScalpApp:
             return md_escape(f"Ошибка записи .env: {e}")
 
     def _cmd_pause(self, _text: str) -> str:
-        self.risk.paused_until = time.time() + 2 * 3600
+        self.risk.pause(2 * 3600)
         return md_escape("⏸ Мягкая пауза на 2 часа включена.")
 
     def _cmd_resume(self, _text: str) -> str:

@@ -4,6 +4,20 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from app.logging_setup import get_logger
+
+log = get_logger("risk")
+
+# Поля, которые обязаны пережить перезапуск процесса.
+_PERSISTED = (
+    "day_pnl",
+    "day_start_ts",
+    "paused_until",
+    "hard_stopped_until",
+    "consecutive_losses",
+)
 
 
 @dataclass
@@ -18,17 +32,51 @@ class RiskState:
     hard_stopped_until: float = 0.0
     consecutive_losses: int = 0
     max_consecutive_losses: int = 3
+    # Вызывается после каждого изменения счётчиков — сюда вешается запись в БД.
+    on_change: Callable[[], None] | None = None
 
-    def _roll_day(self) -> None:
-        if time.time() - self.day_start_ts >= 86400:
-            self.day_pnl = 0.0
-            self.day_start_ts = time.time()
-            self.paused_until = 0.0
-            self.hard_stopped_until = 0.0
-            self.consecutive_losses = 0
+    def snapshot(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in _PERSISTED}
+
+    def restore(self, data: dict[str, Any]) -> None:
+        """Поднять счётчики дня из хранилища.
+
+        Депозит и лимиты берутся из .env: они могли измениться, а вот
+        накопленный убыток и активные паузы менять нельзя — иначе
+        перезапуск превращается в обход дневного стопа.
+        """
+        for name in _PERSISTED:
+            value = data.get(name)
+            if value is None:
+                continue
+            try:
+                current = getattr(self, name)
+                setattr(self, name, type(current)(value))
+            except (TypeError, ValueError):
+                log.warning("состояние риска: поле %s испорчено", name)
+        self._roll_day()
+
+    def _persist(self) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change()
+        except Exception:
+            log.exception("не удалось сохранить состояние риска")
+
+    def _roll_day(self) -> bool:
+        if time.time() - self.day_start_ts < 86400:
+            return False
+        self.day_pnl = 0.0
+        self.day_start_ts = time.time()
+        self.paused_until = 0.0
+        self.hard_stopped_until = 0.0
+        self.consecutive_losses = 0
+        return True
 
     def status(self) -> str:
-        self._roll_day()
+        if self._roll_day():
+            self._persist()
         now = time.time()
         if now < self.hard_stopped_until:
             return "hard_stop"
@@ -76,8 +124,14 @@ class RiskState:
         ):
             self.paused_until = time.time() + 2 * 3600
             events.append("soft_pause")
+        self._persist()
         return events
+
+    def pause(self, seconds: float) -> None:
+        self.paused_until = time.time() + seconds
+        self._persist()
 
     def manual_resume(self) -> None:
         self.paused_until = 0.0
         self.hard_stopped_until = 0.0
+        self._persist()

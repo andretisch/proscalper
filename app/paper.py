@@ -23,17 +23,41 @@ from app.paper_exec import (
 )
 from app.risk import RiskState
 from app.signals import Signal
+from app.state_store import StateStore
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class PaperBroker:
-    def __init__(self, settings: Settings, risk: RiskState) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        risk: RiskState,
+        state: StateStore | None = None,
+    ) -> None:
         self.s = settings
         self.risk = risk
         self.journal = Journal(settings.root / "data" / "journal" / "journal.sqlite3")
+        self.state = state
         self._cooldown: dict[str, float] = {}
+        if state is not None:
+            stored = state.load("cooldown") or {}
+            now = time.time()
+            self._cooldown = {
+                symbol: float(until)
+                for symbol, until in stored.items()
+                if _is_number(until) and float(until) > now
+            }
 
     def open_symbols(self) -> set[str]:
         return {t["symbol"] for t in self.journal.list_trades(status="open")}
+
+    def _remember_cooldown(self, symbol: str) -> None:
+        self._cooldown[symbol] = time.time() + self.s.symbol_cooldown_sec
+        if self.state is not None:
+            self.state.save("cooldown", self._cooldown)
 
     def cooldown_left(self, symbol: str) -> float:
         """Anti-churn: no immediate re-entry into the same level after an exit."""
@@ -222,7 +246,7 @@ class PaperBroker:
                 fees_usd=fees,
             )
             risk_events.extend(result.get("risk_events") or [])
-            self._cooldown[symbol] = time.time() + self.s.symbol_cooldown_sec
+            self._remember_cooldown(symbol)
             closed.append(
                 f"#{trade['id']} {symbol} {trade['setup_id']} {trade['side']} "
                 f"pnl={float(result.get('pnl_usd') or 0):.4f} fee={fees:.4f} "

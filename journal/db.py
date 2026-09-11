@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS trade_events (
     snapshot_id INTEGER REFERENCES orderbook_snapshots(id) ON DELETE SET NULL
 );
 
+-- Счётчики дня и cooldown: без них перезапуск обнуляет дневной лимит риска.
+CREATE TABLE IF NOT EXISTS runtime_state (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_setup ON trades(setup_id);
